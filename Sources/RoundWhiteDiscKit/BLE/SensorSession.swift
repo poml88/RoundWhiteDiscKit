@@ -1,7 +1,7 @@
 import Foundation
 @preconcurrency import CoreBluetooth
 
-#if canImport(UIKit) || canImport(AppKit)
+#if canImport(CoreBluetooth)
 
 // Connected-and-discovered session against a Libre 3 sensor. After
 // `discoverAndSubscribe()` returns the session is ready to send/receive

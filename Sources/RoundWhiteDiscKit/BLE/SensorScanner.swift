@@ -1,7 +1,7 @@
 import Foundation
 @preconcurrency import CoreBluetooth
 
-#if canImport(UIKit) || canImport(AppKit)
+#if canImport(CoreBluetooth)
 
 // Async BLE scanner for Libre 3 sensors. Wraps a CBCentralManager and
 // surfaces discoveries via an AsyncStream.

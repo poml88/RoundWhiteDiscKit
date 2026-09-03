@@ -1,5 +1,5 @@
 import Foundation
-#if canImport(CoreBluetooth) && (canImport(UIKit) || canImport(AppKit))
+#if canImport(CoreBluetooth)
 @preconcurrency import CoreBluetooth
 
 // Adapter that lets `PairingFlow` drive a real `SensorSession` (CoreBluetooth)
