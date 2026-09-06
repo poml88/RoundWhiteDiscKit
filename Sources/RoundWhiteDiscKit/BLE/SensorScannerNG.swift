@@ -29,8 +29,55 @@ public final class SensorScannerNG: NSObject, @unchecked Sendable {
         case willRestoreState(SensorRestorationEvent)
     }
 
+    /// Metadata supplied by CoreBluetooth's disconnect callback.
+    public struct DisconnectMetadata: Sendable, Equatable {
+        public let timestamp: CFAbsoluteTime
+        public let isReconnecting: Bool
+
+        public init(timestamp: CFAbsoluteTime, isReconnecting: Bool) {
+            self.timestamp = timestamp
+            self.isReconnecting = isReconnecting
+        }
+    }
+
+    /// The unchanged scanner event together with disconnect context. Metadata
+    /// is present for `.didDisconnect` and `nil` for every other event case.
+    public struct ContextualEvent: Sendable {
+        public let event: Event
+        public let disconnectMetadata: DisconnectMetadata?
+
+        public init(event: Event, disconnectMetadata: DisconnectMetadata?) {
+            self.event = event
+            self.disconnectMetadata = disconnectMetadata
+        }
+    }
+
+    enum EventSubscriber {
+        case legacy(AsyncStream<Event>.Continuation)
+        case contextual(AsyncStream<ContextualEvent>.Continuation)
+
+        func yield(_ contextualEvent: ContextualEvent) {
+            switch self {
+            case .legacy(let continuation):
+                continuation.yield(contextualEvent.event)
+            case .contextual(let continuation):
+                continuation.yield(contextualEvent)
+            }
+        }
+
+        func finish() {
+            switch self {
+            case .legacy(let continuation):
+                continuation.finish()
+            case .contextual(let continuation):
+                continuation.finish()
+            }
+        }
+    }
+
 
     private let configuration: SensorScannerConfiguration
+    private let enableAutoReconnect: Bool
     /// Internal queue the CBCentralManager dispatches delegate callbacks
     /// on. Exposed publicly because callers who construct a SensorSession
     /// from a `.didConnect`'d peripheral typically want to use the same
@@ -41,10 +88,10 @@ public final class SensorScannerNG: NSObject, @unchecked Sendable {
         CBCentralManager(delegate: self, queue: centralQueue, options: configuration.centralOptions)
     }()
 
-    /// AsyncStream continuations -- one per active events() subscriber,
+    /// AsyncStream continuations -- one per active subscriber of either API,
     /// keyed by a UUID we hand back on subscription for termination.
     /// Mutated only on centralQueue.
-    private var eventContinuations: [UUID: AsyncStream<Event>.Continuation] = [:]
+    private var eventSubscribers: [UUID: EventSubscriber] = [:]
 
     /// Restoration events arrive before any consumer has a chance to
     /// subscribe (CB delivers them before we even return from init()).
@@ -76,8 +123,16 @@ public final class SensorScannerNG: NSObject, @unchecked Sendable {
     /// only on centralQueue.
     private var cancellingPeripherals: Set<UUID> = []
 
-    public init(configuration: SensorScannerConfiguration = .foreground) {
+    /// All access is serialized on `centralQueue`. The policy value is kept
+    /// separate so retirement decisions can be tested without a Bluetooth stack.
+    private var retirementState = SensorScannerNGRetirementState()
+
+    public init(
+        configuration: SensorScannerConfiguration = .foreground,
+        enableAutoReconnect: Bool = false
+    ) {
         self.configuration = configuration
+        self.enableAutoReconnect = enableAutoReconnect
         super.init()
         _ = central // force lazy init
     }
@@ -89,6 +144,13 @@ public final class SensorScannerNG: NSObject, @unchecked Sendable {
         var state: CBManagerState = .unknown
         centralQueue.sync { state = self.central.state }
         return state
+    }
+
+    /// Whether this scanner has permanently completed its retirement work.
+    public var isRetired: Bool {
+        var retired = false
+        centralQueue.sync { retired = retirementState.isRetired }
+        return retired
     }
 
     /// Subscribe to the event stream. Each subscriber gets an
@@ -106,24 +168,36 @@ public final class SensorScannerNG: NSObject, @unchecked Sendable {
                     continuation.finish()
                     return
                 }
-                self.eventContinuations[id] = continuation
-                // Snapshot of the current state so a consumer that
-                // subscribes after CB has already settled doesn't have
-                // to wait forever for the next transition. This is
-                // analogous to the old SensorScanner.stateEvents()
-                // contract that yielded the current state on subscribe.
-                continuation.yield(.stateChanged(self.central.state))
-                if !self.pendingRestorationEvents.isEmpty {
-                    for event in self.pendingRestorationEvents {
-                        continuation.yield(.willRestoreState(event))
-                    }
-                    self.pendingRestorationEvents.removeAll()
+                self.register(.legacy(continuation), id: id)
+            }
+        }
+    }
+
+    /// Subscribe to the same event stream as ``events()``, with optional
+    /// metadata for disconnect callbacks that provide it. Registration,
+    /// state replay and one-time restoration delivery are shared across both
+    /// APIs, so the first subscriber of either kind receives restoration.
+    public func eventsWithContext() -> AsyncStream<ContextualEvent> {
+        let id = UUID()
+        return AsyncStream { continuation in
+            centralQueue.async { [weak self] in
+                guard let self else {
+                    continuation.finish()
+                    return
                 }
-                continuation.onTermination = { [weak self] _ in
-                    self?.centralQueue.async {
-                        self?.eventContinuations.removeValue(forKey: id)
-                    }
-                }
+                self.register(.contextual(continuation), id: id)
+            }
+        }
+    }
+
+    /// Permanently retires this scanner. Completion means all retirement work
+    /// has run on `centralQueue`; it does not imply a physical radio reset or a
+    /// confirmed peripheral disconnection.
+    public func retire() async {
+        await withCheckedContinuation { continuation in
+            centralQueue.async { [self] in
+                retireOnCentralQueue()
+                continuation.resume()
             }
         }
     }
@@ -132,7 +206,7 @@ public final class SensorScannerNG: NSObject, @unchecked Sendable {
 
     public func startScan(services: [CBUUID]? = [LibreSensorGATT.serviceUUID]) {
         centralQueue.async { [weak self] in
-            guard let self else { return }
+            guard let self, !self.retirementState.isRetired else { return }
             self.central.scanForPeripherals(
                 withServices: services,
                 options: [CBCentralManagerScanOptionAllowDuplicatesKey: false]
@@ -142,7 +216,8 @@ public final class SensorScannerNG: NSObject, @unchecked Sendable {
 
     public func stopScan() {
         centralQueue.async { [weak self] in
-            self?.central.stopScan()
+            guard let self, !self.retirementState.isRetired else { return }
+            self.central.stopScan()
         }
     }
 
@@ -150,7 +225,7 @@ public final class SensorScannerNG: NSObject, @unchecked Sendable {
 
     public func requestConnect(_ peripheral: CBPeripheral) {
         centralQueue.async { [weak self] in
-            guard let self else { return }
+            guard let self, !self.retirementState.isRetired else { return }
             // A fresh connect intent supersedes any pending cancellation handoff,
             // so a superseded cancel's terminal callback won't drop this new ref.
             self.cancellingPeripherals.remove(peripheral.identifier)
@@ -159,13 +234,19 @@ public final class SensorScannerNG: NSObject, @unchecked Sendable {
             self.retainedPeripherals[peripheral.identifier] = peripheral
             // central.connect is idempotent; if the peripheral is
             // already connecting or connected, this is a no-op.
-            self.central.connect(peripheral, options: self.configuration.connectOptions)
+            self.central.connect(
+                peripheral,
+                options: SensorScannerNGConnectOptions.merging(
+                    self.configuration.connectOptions,
+                    enableAutoReconnect: self.enableAutoReconnect
+                )
+            )
         }
     }
 
     public func cancelConnection(_ peripheral: CBPeripheral) {
         centralQueue.async { [weak self] in
-            guard let self else { return }
+            guard let self, !self.retirementState.isRetired else { return }
             let state = peripheral.state
             self.central.cancelPeripheralConnection(peripheral)
             switch state {
@@ -194,7 +275,9 @@ public final class SensorScannerNG: NSObject, @unchecked Sendable {
     /// `didDisconnect(error: nil)`; on iOS it may not be. Callers must tolerate both.
     public func cancelConnectionIfStillConnecting(_ peripheral: CBPeripheral) {
         centralQueue.async { [weak self] in
-            guard let self, peripheral.state == .connecting else { return }
+            guard let self,
+                  !self.retirementState.isRetired,
+                  peripheral.state == .connecting else { return }
             self.central.cancelPeripheralConnection(peripheral)
             self.cancellingPeripherals.remove(peripheral.identifier)
             self.retainedPeripherals[peripheral.identifier] = nil
@@ -205,13 +288,19 @@ public final class SensorScannerNG: NSObject, @unchecked Sendable {
 
     public func retrievePeripherals(withIdentifiers ids: [UUID]) -> [CBPeripheral] {
         var result: [CBPeripheral] = []
-        centralQueue.sync { result = self.central.retrievePeripherals(withIdentifiers: ids) }
+        centralQueue.sync {
+            guard !retirementState.isRetired else { return }
+            result = central.retrievePeripherals(withIdentifiers: ids)
+        }
         return result
     }
 
     public func retrieveConnectedPeripherals(serviceUUIDs: [CBUUID] = [LibreSensorGATT.serviceUUID]) -> [CBPeripheral] {
         var result: [CBPeripheral] = []
-        centralQueue.sync { result = self.central.retrieveConnectedPeripherals(withServices: serviceUUIDs) }
+        centralQueue.sync {
+            guard !retirementState.isRetired else { return }
+            result = central.retrieveConnectedPeripherals(withServices: serviceUUIDs)
+        }
         return result
     }
 
@@ -223,7 +312,7 @@ public final class SensorScannerNG: NSObject, @unchecked Sendable {
     ) {
         #if os(iOS)
         centralQueue.async { [weak self] in
-            guard let self else { return }
+            guard let self, !self.retirementState.isRetired else { return }
             var options: [CBConnectionEventMatchingOption: Any] = [:]
             if let peripheralIDs {
                 options[.peripheralUUIDs] = peripheralIDs
@@ -241,11 +330,141 @@ public final class SensorScannerNG: NSObject, @unchecked Sendable {
 
     // MARK: - Internal: emit
 
-    /// Yield an event to every subscriber. Must be called on centralQueue.
-    private func emit(_ event: Event) {
-        for continuation in eventContinuations.values {
-            continuation.yield(event)
+    /// Register either stream shape through the same ordering and restoration
+    /// path. Must be called on centralQueue.
+    private func register(_ subscriber: EventSubscriber, id: UUID) {
+        guard !retirementState.isRetired else {
+            subscriber.finish()
+            return
         }
+
+        eventSubscribers[id] = subscriber
+        // Snapshot of the current state so a consumer that subscribes after CB
+        // has already settled doesn't have to wait for the next transition.
+        subscriber.yield(ContextualEvent(
+            event: .stateChanged(central.state),
+            disconnectMetadata: nil
+        ))
+        if !pendingRestorationEvents.isEmpty {
+            for event in pendingRestorationEvents {
+                subscriber.yield(ContextualEvent(
+                    event: .willRestoreState(event),
+                    disconnectMetadata: nil
+                ))
+            }
+            pendingRestorationEvents.removeAll()
+        }
+
+        switch subscriber {
+        case .legacy(let continuation):
+            continuation.onTermination = { [weak self] _ in
+                self?.removeSubscriber(id: id)
+            }
+        case .contextual(let continuation):
+            continuation.onTermination = { [weak self] _ in
+                self?.removeSubscriber(id: id)
+            }
+        }
+    }
+
+    private func removeSubscriber(id: UUID) {
+        centralQueue.async { [weak self] in
+            self?.eventSubscribers.removeValue(forKey: id)
+        }
+    }
+
+    /// Yield an event to every subscriber. Must be called on centralQueue.
+    private func emit(_ event: Event, disconnectMetadata: DisconnectMetadata? = nil) {
+        guard !retirementState.isRetired else { return }
+        let contextualEvent = ContextualEvent(
+            event: event,
+            disconnectMetadata: disconnectMetadata
+        )
+        for subscriber in eventSubscribers.values {
+            subscriber.yield(contextualEvent)
+        }
+    }
+
+    private func emitDisconnect(
+        _ peripheral: CBPeripheral,
+        error: Error?,
+        timestamp: CFAbsoluteTime,
+        isReconnecting: Bool
+    ) {
+        releaseIfCancelling(peripheral)
+        emit(
+            .didDisconnect(peripheral, error: error),
+            disconnectMetadata: DisconnectMetadata(
+                timestamp: timestamp,
+                isReconnecting: isReconnecting
+            )
+        )
+    }
+
+    /// Must be called on centralQueue.
+    private func retireOnCentralQueue() {
+        let decision = retirementState.begin(centralState: central.state)
+        guard decision.shouldRetire else { return }
+
+        if decision.shouldIssueCentralCommands {
+            central.stopScan()
+            for peripheral in retainedPeripherals.values {
+                central.cancelPeripheralConnection(peripheral)
+            }
+        }
+
+        let subscribers = Array(eventSubscribers.values)
+        eventSubscribers.removeAll()
+        for subscriber in subscribers {
+            subscriber.finish()
+        }
+        pendingRestorationEvents.removeAll()
+        // Ordinary cancellation retains a peripheral until its terminal callback.
+        // Retirement is the deliberate exception: all streams and delegate
+        // delivery end here, so no callback remains for this scanner to service
+        // and releasing its entire ownership graph is the intended outcome.
+        retainedPeripherals.removeAll()
+        cancellingPeripherals.removeAll()
+
+        // Stop all future delegate delivery before the owning scanner releases
+        // its final reference to this central manager.
+        central.delegate = nil
+    }
+}
+
+struct SensorScannerNGConnectOptions {
+    static func merging(
+        _ configuredOptions: [String: Any]?,
+        enableAutoReconnect: Bool
+    ) -> [String: Any]? {
+        var options = configuredOptions ?? [:]
+        if enableAutoReconnect {
+            options[CBConnectPeripheralOptionEnableAutoReconnect] = true
+        }
+        return options.isEmpty ? nil : options
+    }
+}
+
+struct SensorScannerNGRetirementDecision: Equatable {
+    let shouldRetire: Bool
+    let shouldIssueCentralCommands: Bool
+}
+
+struct SensorScannerNGRetirementState {
+    private(set) var isRetired = false
+
+    mutating func begin(centralState: CBManagerState) -> SensorScannerNGRetirementDecision {
+        guard !isRetired else {
+            return SensorScannerNGRetirementDecision(
+                shouldRetire: false,
+                shouldIssueCentralCommands: false
+            )
+        }
+        isRetired = true
+        return SensorScannerNGRetirementDecision(
+            shouldRetire: true,
+            shouldIssueCentralCommands: centralState == .poweredOn
+        )
     }
 }
 
@@ -286,9 +505,19 @@ extension SensorScannerNG: CBCentralManagerDelegate {
         emit(.didFailToConnect(peripheral, error: error))
     }
 
-    public func centralManager(_ central: CBCentralManager, didDisconnectPeripheral peripheral: CBPeripheral, error: Error?) {
-        releaseIfCancelling(peripheral)
-        emit(.didDisconnect(peripheral, error: error))
+    public func centralManager(
+        _ central: CBCentralManager,
+        didDisconnectPeripheral peripheral: CBPeripheral,
+        timestamp: CFAbsoluteTime,
+        isReconnecting: Bool,
+        error: Error?
+    ) {
+        emitDisconnect(
+            peripheral,
+            error: error,
+            timestamp: timestamp,
+            isReconnecting: isReconnecting
+        )
     }
 
     /// Terminal callback for a peripheral we intentionally cancelled: the
@@ -312,6 +541,7 @@ extension SensorScannerNG: CBCentralManagerDelegate {
     #endif
 
     public func centralManager(_ central: CBCentralManager, willRestoreState dict: [String: Any]) {
+        guard !retirementState.isRetired else { return }
         let peripherals = (dict[CBCentralManagerRestoredStatePeripheralsKey] as? [CBPeripheral]) ?? []
         // Retain the restored peripherals immediately (this delegate call is on
         // centralQueue). iOS hands them back connected, but if we don't hold a
@@ -331,8 +561,8 @@ extension SensorScannerNG: CBCentralManagerDelegate {
             }
         )
         // willRestoreState fires before consumers can subscribe; buffer
-        // until the first events() subscription, then replay.
-        if eventContinuations.isEmpty {
+        // until the first subscription of either event API, then replay.
+        if eventSubscribers.isEmpty {
             pendingRestorationEvents.append(event)
         } else {
             emit(.willRestoreState(event))
