@@ -175,11 +175,29 @@ public final class SensorScannerNG: NSObject, @unchecked Sendable {
                 // don't drop the handle while CB still has a callback outstanding.
                 self.cancellingPeripherals.insert(peripheral.identifier)
             default:
-                // .connecting/.disconnected: cancelling a pending connect fires no
-                // terminal callback, so there's nothing to retain through.
+                // .connecting/.disconnected: iOS fires no terminal callback for a
+                // pending-connect cancel, while watchOS does deliver didDisconnect.
+                // Neither path needs the scanner to retain the peripheral here.
                 self.cancellingPeripherals.remove(peripheral.identifier)
                 self.retainedPeripherals[peripheral.identifier] = nil
             }
+        }
+    }
+
+    /// Cancel a pending connect only if the peripheral is still `.connecting`. The
+    /// state check and cancel run in one block on the central queue, where CB's
+    /// delegate callbacks are also delivered, so a `didConnect` cannot slip in
+    /// between them and be torn down by the cancel. A peripheral that has already
+    /// connected, or has already dropped to `.disconnected`, is left alone.
+    ///
+    /// On watchOS a cancelled pending connect is followed by
+    /// `didDisconnect(error: nil)`; on iOS it may not be. Callers must tolerate both.
+    public func cancelConnectionIfStillConnecting(_ peripheral: CBPeripheral) {
+        centralQueue.async { [weak self] in
+            guard let self, peripheral.state == .connecting else { return }
+            self.central.cancelPeripheralConnection(peripheral)
+            self.cancellingPeripherals.remove(peripheral.identifier)
+            self.retainedPeripherals[peripheral.identifier] = nil
         }
     }
 
