@@ -38,6 +38,8 @@ public enum SensorSessionError: Error {
     case notifyFailed(CBUUID, Bool, String)
     /// Transport: a GATT read failed.
     case readFailed(CBUUID, String)
+    /// Transport: reading the connected peripheral's current RSSI failed.
+    case rssiReadFailed(String)
     /// Transport: a GATT write failed. (Inspect the ATT code for auth/encryption
     /// rejections, but treat the failure itself as transport — retry.)
     case writeFailed(CBUUID, String)
@@ -59,6 +61,8 @@ extension SensorSessionError: CustomStringConvertible {
             return "notifyFailed(\(uuid.uuidString), enable=\(enabled)) — \(detail)"
         case .readFailed(let uuid, let detail):
             return "readFailed(\(uuid.uuidString)) — \(detail)"
+        case .rssiReadFailed(let detail):
+            return "rssiReadFailed — \(detail)"
         case .writeFailed(let uuid, let detail):
             return "writeFailed(\(uuid.uuidString)) — \(detail)"
         case .disconnected(let detail):
@@ -161,9 +165,15 @@ public final class SensorSession: NSObject, @unchecked Sendable {
             return cont
         }
     }
+    private struct PendingRSSIRead {
+        let id: UUID
+        let continuation: CheckedContinuation<Int, Error>
+        let timeoutWorkItem: DispatchWorkItem
+    }
     private var pendingWrites: [CBUUID: [PendingWrite]] = [:]
     private var pendingReads: [CBUUID: [PendingRead]] = [:]
     private var pendingNotifyChanges: [CBUUID: [PendingNotifyChange]] = [:]
+    private var pendingRSSIReads: [PendingRSSIRead] = []
     private var notifyContinuations: [AsyncStream<NotifyEvent>.Continuation] = []
     private var servicesPendingChars: Int = 0
     private var notifyPending: Set<CBUUID> = []
@@ -425,6 +435,49 @@ public final class SensorSession: NSObject, @unchecked Sendable {
         }
     }
 
+    /// Reads the current RSSI for the connected peripheral. This is an explicit
+    /// sample: callers choose the cadence so the session adds no timer or wakeup.
+    public func readRSSI(timeout: TimeInterval = 5) async throws -> Int {
+        try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Int, Error>) in
+            queue.async {
+                guard self.peripheral.state == .connected else {
+                    cont.resume(throwing: SensorSessionError.disconnected(nil))
+                    return
+                }
+                guard self.pendingRSSIReads.isEmpty else {
+                    cont.resume(
+                        throwing: SensorSessionError.rssiReadFailed(
+                            "Another RSSI read is already in progress"
+                        )
+                    )
+                    return
+                }
+                let readID = UUID()
+                let timeoutWorkItem = DispatchWorkItem { [weak self] in
+                    guard let self,
+                          let index = self.pendingRSSIReads.firstIndex(where: { $0.id == readID }) else {
+                        return
+                    }
+                    let pending = self.pendingRSSIReads.remove(at: index)
+                    pending.continuation.resume(
+                        throwing: SensorSessionError.rssiReadFailed(
+                            String(format: "Timed out waiting %.1fs for RSSI response", timeout)
+                        )
+                    )
+                }
+                self.pendingRSSIReads.append(
+                    PendingRSSIRead(
+                        id: readID,
+                        continuation: cont,
+                        timeoutWorkItem: timeoutWorkItem
+                    )
+                )
+                self.peripheral.readRSSI()
+                self.queue.asyncAfter(deadline: .now() + timeout, execute: timeoutWorkItem)
+            }
+        }
+    }
+
     /// Direct GATT read of the current `patchStatus` value.
     ///
     /// Vendor-parity fallback for `patchStatus`. Abbott's own app expects
@@ -542,6 +595,11 @@ public final class SensorSession: NSObject, @unchecked Sendable {
                 }
             }
             self.pendingNotifyChanges.removeAll()
+            for pending in self.pendingRSSIReads {
+                pending.timeoutWorkItem.cancel()
+                pending.continuation.resume(throwing: SensorSessionError.disconnected(msg))
+            }
+            self.pendingRSSIReads.removeAll()
             for cont in self.notifyContinuations { cont.finish() }
             self.notifyContinuations.removeAll()
             self.finishDiscovery(.failure(SensorSessionError.disconnected(msg)))
@@ -564,6 +622,19 @@ public final class SensorSession: NSObject, @unchecked Sendable {
 }
 
 extension SensorSession: CBPeripheralDelegate {
+
+    public func peripheral(_ peripheral: CBPeripheral, didReadRSSI RSSI: NSNumber, error: Error?) {
+        guard !pendingRSSIReads.isEmpty else { return }
+        let pending = pendingRSSIReads.removeFirst()
+        pending.timeoutWorkItem.cancel()
+        if let error {
+            pending.continuation.resume(
+                throwing: SensorSessionError.rssiReadFailed(attErrorDescription(error))
+            )
+        } else {
+            pending.continuation.resume(returning: RSSI.intValue)
+        }
+    }
 
     public func peripheral(_ peripheral: CBPeripheral, didDiscoverServices error: Error?) {
         if let error = error {
