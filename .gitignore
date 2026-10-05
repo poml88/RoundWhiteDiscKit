@@ -12,3 +12,6 @@ Libre3SensorState.json
 
 # Remote runtime-tables blob (Scripts/build_runtime_tables_blob.py); served to host apps, not committed.
 RemoteTables/
+
+# Remote blobs and their sources (private keys) are published, never committed.
+RemoteTables/

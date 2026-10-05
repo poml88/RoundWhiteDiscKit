@@ -5,6 +5,9 @@ public struct Libre3NFCPatchInfo: Sendable, Equatable {
     public let raw: Data
     public let stateByte: UInt8
     public let productType: UInt8
+    public let securityVersion: UInt16
+    /// 1 Europe, 2 US, 4 Australia/Canada, 8 eastern rest-of-world (per DiaBLE).
+    public let region: UInt16
     public let generation: UInt16
     public let wearDurationMinutes: UInt16
     public let warmupMinutes: UInt16
@@ -18,6 +21,8 @@ public struct Libre3NFCPatchInfo: Sendable, Equatable {
         }
         self.inputRaw = raw
         self.raw = frame
+        self.securityVersion = Self.u16(frame, 3)
+        self.region = Self.u16(frame, 5)
         self.generation = Self.u16(frame, 7)
         self.wearDurationMinutes = Self.u16(frame, 9)
         self.firmwareVersion = "\(Self.byte(frame, 14)).\(Self.byte(frame, 13)).\(Self.byte(frame, 12)).\(Self.byte(frame, 11))"

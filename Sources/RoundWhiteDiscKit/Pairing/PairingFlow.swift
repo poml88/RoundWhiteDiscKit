@@ -389,6 +389,7 @@ public actor PairingFlow {
         tail4: Data,
         phase5RawKeyProvider: (CachedReconnectPreambleResult) throws -> Data,
         r2Provider: () throws -> Data = defaultPhase5R2,
+        phase5Cipher: (Data) throws -> AESBlockEncrypt = LibAES.phase5BlockEncryptor,
         commandTimeout: TimeInterval = 2
     ) async throws -> CachedReconnectHandshakeResult {
         guard tail4.count == 4 else {
@@ -408,7 +409,7 @@ public actor PairingFlow {
         guard phase5RawKey.count == 16 else {
             throw ChallengeError.wrongKeySize(phase5RawKey.count)
         }
-        let phase5Block = try LibAES.phase5BlockEncryptor(rawKey: phase5RawKey)
+        let phase5Block = try phase5Cipher(phase5RawKey)
         let phase5Plaintext = preamble.sensorR1 + phase5R2 + tail4
         let phase5 = try Phase5Challenge.encrypt(
             plaintext: phase5Plaintext,
@@ -448,12 +449,14 @@ public actor PairingFlow {
         tail4: Data,
         phase5RawKey: Data,
         r2Provider: () throws -> Data = defaultPhase5R2,
+        phase5Cipher: (Data) throws -> AESBlockEncrypt = LibAES.phase5BlockEncryptor,
         commandTimeout: TimeInterval = 2
     ) async throws -> CachedReconnectHandshakeResult {
         try await runCachedReconnectHandshake(
             tail4: tail4,
             phase5RawKeyProvider: { _ in phase5RawKey },
             r2Provider: r2Provider,
+            phase5Cipher: phase5Cipher,
             commandTimeout: commandTimeout
         )
     }
@@ -474,6 +477,7 @@ public actor PairingFlow {
         tail4: Data,
         phase5RawKeyProvider: (CommandGatedAuthorizationPreambleResult) throws -> Data,
         r2Provider: () throws -> Data = defaultPhase5R2,
+        phase5Cipher: (Data) throws -> AESBlockEncrypt = LibAES.phase5BlockEncryptor,
         commandTimeout: TimeInterval = 2
     ) async throws -> CommandGatedAuthorizationHandshakeResult {
         guard tail4.count == 4 else {
@@ -493,7 +497,7 @@ public actor PairingFlow {
         guard phase5RawKey.count == 16 else {
             throw ChallengeError.wrongKeySize(phase5RawKey.count)
         }
-        let phase5Block = try LibAES.phase5BlockEncryptor(rawKey: phase5RawKey)
+        let phase5Block = try phase5Cipher(phase5RawKey)
         let phase5Plaintext = preamble.sensorR1 + phase5R2 + tail4
         let phase5 = try Phase5Challenge.encrypt(
             plaintext: phase5Plaintext,
@@ -532,6 +536,7 @@ public actor PairingFlow {
         blePIN: Data,
         phase5RawKeyProvider: (FirstPairPreambleResult) throws -> Data,
         r2Provider: () throws -> Data = defaultPhase5R2,
+        phase5Cipher: (Data) throws -> AESBlockEncrypt = LibAES.phase5BlockEncryptor,
         commandTimeout: TimeInterval = 2
     ) async throws -> FirstPairHandshakeResult {
         guard blePIN.count == 4 else {
@@ -542,6 +547,7 @@ public actor PairingFlow {
             tail4: blePIN,
             phase5RawKeyProvider: phase5RawKeyProvider,
             r2Provider: r2Provider,
+            phase5Cipher: phase5Cipher,
             commandTimeout: commandTimeout
         )
     }
