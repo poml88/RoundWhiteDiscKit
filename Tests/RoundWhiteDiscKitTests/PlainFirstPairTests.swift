@@ -12,16 +12,14 @@ final class PlainFirstPairTests: XCTestCase {
         XCTAssertEqual(
             try PlainPhase5Key.derive(
                 ephemeralSecret: ephemeralSecret,
-                staticSecret: staticSecret,
-                order: .ephemeralFirst
+                staticSecret: staticSecret
             ).hex,
             "494a7a870fa4fe978918cfeab53a6282"
         )
         XCTAssertEqual(
             try PlainPhase5Key.derive(
-                ephemeralSecret: ephemeralSecret,
-                staticSecret: staticSecret,
-                order: .staticFirst
+                ephemeralSecret: staticSecret,
+                staticSecret: ephemeralSecret
             ).hex,
             "c66aae1f0221dd0290a9e853c9cbd2d3"
         )
@@ -31,8 +29,7 @@ final class PlainFirstPairTests: XCTestCase {
         XCTAssertThrowsError(
             try PlainPhase5Key.derive(
                 ephemeralSecret: Data(count: 31),
-                staticSecret: staticSecret,
-                order: .ephemeralFirst
+                staticSecret: staticSecret
             )
         ) { error in
             XCTAssertEqual(error as? PlainPairingError, .invalidSharedSecretLength(31))
@@ -59,35 +56,32 @@ final class PlainFirstPairTests: XCTestCase {
         }
     }
 
-    func testPlainFirstPairCompletesAgainstSimulatedSensorForMatchingOrder() async throws {
-        for order in PlainPhase5SecretOrder.allCases {
-            let identity = try Self.makeIdentity()
-            let sensor = SimulatedPlainSensor(order: order, blePIN: blePIN)
-            let flow = PairingFlow(
-                transport: sensor,
-                phoneCert: identity.phoneCert,
-                sensorCertSigningKeys: []
-            )
+    func testPlainFirstPairCompletesAgainstSimulatedSensor() async throws {
+        let identity = try Self.makeIdentity()
+        let sensor = SimulatedPlainSensor(blePIN: blePIN)
+        let flow = PairingFlow(
+            transport: sensor,
+            phoneCert: identity.phoneCert,
+            sensorCertSigningKeys: []
+        )
 
-            let result = try await flow.runCommandGatedPlainFirstPairHandshake(
-                blePIN: blePIN,
-                identity: identity,
-                secretOrder: order
-            )
+        let result = try await flow.runCommandGatedPlainFirstPairHandshake(
+            blePIN: blePIN,
+            identity: identity
+        )
 
-            let sensorKey = try await sensor.derivedKey()
-            XCTAssertEqual(result.phase5Key, sensorKey, "\(order)")
-            XCTAssertEqual(result.handshake.sessionMaterial.kEnc, sensor.kEnc)
-            XCTAssertEqual(result.handshake.sessionMaterial.ivEnc, sensor.ivEnc)
-            XCTAssertEqual(result.handshake.sessionMaterial.sensorR1, sensor.r1)
-            let commands = await sensor.commandWrites
-            XCTAssertEqual(commands, [0x01, 0x02, 0x03, 0x09, 0x0d, 0x0e, 0x11, 0x08])
-        }
+        let sensorKey = try await sensor.derivedKey()
+        XCTAssertEqual(result.phase5Key, sensorKey)
+        XCTAssertEqual(result.handshake.sessionMaterial.kEnc, sensor.kEnc)
+        XCTAssertEqual(result.handshake.sessionMaterial.ivEnc, sensor.ivEnc)
+        XCTAssertEqual(result.handshake.sessionMaterial.sensorR1, sensor.r1)
+        let commands = await sensor.commandWrites
+        XCTAssertEqual(commands, [0x01, 0x02, 0x03, 0x09, 0x0d, 0x0e, 0x11, 0x08])
     }
 
     func testPlainFirstPairFailsWhenSensorUsesOtherOrder() async throws {
         let identity = try Self.makeIdentity()
-        let sensor = SimulatedPlainSensor(order: .staticFirst, blePIN: blePIN)
+        let sensor = SimulatedPlainSensor(blePIN: blePIN, reverseSecrets: true)
         let flow = PairingFlow(
             transport: sensor,
             phoneCert: identity.phoneCert,
@@ -97,8 +91,7 @@ final class PlainFirstPairTests: XCTestCase {
         do {
             _ = try await flow.runCommandGatedPlainFirstPairHandshake(
                 blePIN: blePIN,
-                identity: identity,
-                secretOrder: .ephemeralFirst
+                identity: identity
             )
             XCTFail("Sensor should not answer Phase 6 for a Phase 5 under the wrong key")
         } catch is SimulatedSensorSilent {
@@ -114,7 +107,7 @@ final class PlainFirstPairTests: XCTestCase {
             publicKey65Override: P256.KeyAgreement.PrivateKey().publicKey.x963Representation
         )
         let flow = PairingFlow(
-            transport: SimulatedPlainSensor(order: .ephemeralFirst, blePIN: blePIN),
+            transport: SimulatedPlainSensor(blePIN: blePIN),
             phoneCert: identity.phoneCert,
             phoneEph: nativeStyle,
             sensorCertSigningKeys: []
@@ -123,8 +116,7 @@ final class PlainFirstPairTests: XCTestCase {
         do {
             _ = try await flow.runCommandGatedPlainFirstPairHandshake(
                 blePIN: blePIN,
-                identity: identity,
-                secretOrder: .ephemeralFirst
+                identity: identity
             )
             XCTFail("A native-style ephemeral must be rejected before any wire traffic")
         } catch let error as PlainPairingError {
@@ -158,7 +150,7 @@ private actor SimulatedPlainSensor: CommandPairingTransport {
     private let phase6Nonce = Data([0x22, 0x04, 0x00, 0x00, 0x7f, 0x43, 0x8e])
     private let sensorStatic = P256.KeyAgreement.PrivateKey()
     private let sensorEphemeral = P256.KeyAgreement.PrivateKey()
-    private let order: PlainPhase5SecretOrder
+    private let reverseSecrets: Bool
     private let blePIN: Data
     private var phoneStaticPub: Data?
     private var phoneEphemeralPub: Data?
@@ -167,8 +159,8 @@ private actor SimulatedPlainSensor: CommandPairingTransport {
     private(set) var commandWrites: [UInt8] = []
     private(set) var rejectedPhase5 = false
 
-    init(order: PlainPhase5SecretOrder, blePIN: Data) {
-        self.order = order
+    init(blePIN: Data, reverseSecrets: Bool = false) {
+        self.reverseSecrets = reverseSecrets
         self.blePIN = blePIN
     }
 
@@ -180,7 +172,7 @@ private actor SimulatedPlainSensor: CommandPairingTransport {
         let statical = try sensorStatic.sharedSecretFromKeyAgreement(
             with: P256.KeyAgreement.PublicKey(x963Representation: phoneStaticPub)
         ).withUnsafeBytes { Data($0) }
-        let (first, second) = order == .ephemeralFirst ? (ephemeral, statical) : (statical, ephemeral)
+        let (first, second) = reverseSecrets ? (statical, ephemeral) : (ephemeral, statical)
         return Data(SHA256.hash(data: Data([0, 0, 0, 1]) + first + second).prefix(16))
     }
 

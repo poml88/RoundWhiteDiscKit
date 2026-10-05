@@ -179,6 +179,7 @@ final class NFCActivationCommandTests: XCTestCase {
         XCTAssertEqual(state.blePIN.hex, "3225ec72")
         XCTAssertEqual(state.receiverID?.littleEndianHex, "78830d6f")
         XCTAssertEqual(state.source, "NFC activation response")
+        XCTAssertNil(state.productType)
         XCTAssertNil(state.securityVersion)
         XCTAssertNil(state.region)
     }
@@ -192,6 +193,7 @@ final class NFCActivationCommandTests: XCTestCase {
         )
 
         let state = try response.sensorState(serialNumber: patchInfo.serialNumber, patchInfo: patchInfo)
+        XCTAssertEqual(state.productType, patchInfo.productType)
         XCTAssertEqual(state.securityVersion, patchInfo.securityVersion)
         XCTAssertEqual(state.region, patchInfo.region)
         XCTAssertEqual(state.warmupDurationMinutes, 60)

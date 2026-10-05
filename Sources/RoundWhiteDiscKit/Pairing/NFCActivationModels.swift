@@ -122,6 +122,7 @@ public struct Libre3NFCActivationResponse: Sendable, Equatable {
             source: source,
             warmupDurationMinutes: patchInfo.map { Int($0.warmupMinutes) },
             wearDurationMinutes: patchInfo.map { Int($0.wearDurationMinutes) },
+            productType: patchInfo?.productType,
             securityVersion: patchInfo?.securityVersion,
             region: patchInfo?.region
         )

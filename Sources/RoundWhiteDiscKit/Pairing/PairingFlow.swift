@@ -97,7 +97,6 @@ public struct PlainFirstPairHandshakeResult: Sendable {
     public let phase5Key: Data
     /// ECDH(phone_static, sensor_static).
     public let staticSecret: Data
-    public let secretOrder: PlainPhase5SecretOrder
 }
 
 /// Pairing/handshake errors.
@@ -740,7 +739,6 @@ public actor PairingFlow {
     public func runCommandGatedPlainFirstPairHandshake(
         blePIN: Data,
         identity: PlainPairingIdentity,
-        secretOrder: PlainPhase5SecretOrder,
         r2Provider: () throws -> Data = defaultPhase5R2,
         commandTimeout: TimeInterval = 2
     ) async throws -> PlainFirstPairHandshakeResult {
@@ -757,7 +755,7 @@ public actor PairingFlow {
             throw PlainPairingError.phoneEphemeralIsNotPlain
         }
 
-        log("plain first-pair handshake start blePIN=\(Self.hex(blePIN)) order=\(secretOrder.rawValue)")
+        log("plain first-pair handshake start blePIN=\(Self.hex(blePIN))")
         var derived: (key: Data, staticSecret: Data)?
         let handshake = try await runCommandGatedAuthorizationHandshake(
             tail4: blePIN,
@@ -771,10 +769,9 @@ public actor PairingFlow {
                 )
                 let key = try PlainPhase5Key.derive(
                     ephemeralSecret: preamble.phaseHandshake.sharedEphEph,
-                    staticSecret: staticSecret,
-                    order: secretOrder
+                    staticSecret: staticSecret
                 )
-                log("derived plain Phase 5 key order=\(secretOrder.rawValue) key=\(Self.hex(key))")
+                log("derived plain Phase 5 key len=\(key.count)")
                 derived = (key, staticSecret)
                 return AESCCM.commonCryptoBlockEncrypt(key: key)
             },
@@ -787,8 +784,7 @@ public actor PairingFlow {
         return PlainFirstPairHandshakeResult(
             handshake: handshake,
             phase5Key: derived.key,
-            staticSecret: derived.staticSecret,
-            secretOrder: secretOrder
+            staticSecret: derived.staticSecret
         )
     }
 

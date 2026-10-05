@@ -17,6 +17,7 @@ let package = Package(
             path: "Sources/RoundWhiteDiscKit",
             resources: [
                 .process("Resources/Localizations"),
+                .copy("Resources/RWDKAppIdentities.json"),
             ]
         ),
         .testTarget(

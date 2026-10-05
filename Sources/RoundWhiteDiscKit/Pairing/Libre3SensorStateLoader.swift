@@ -10,6 +10,7 @@ public struct Libre3SensorState: Equatable, Sendable {
     public let lastGlucoseMgDL: UInt16?
     public let warmupDurationMinutes: Int?
     public let wearDurationMinutes: Int?
+    public let productType: UInt8?
     public let securityVersion: UInt16?
     /// Raw NFC region byte, including values outside `Libre3SensorRegion`.
     public let region: UInt8?
@@ -24,6 +25,7 @@ public struct Libre3SensorState: Equatable, Sendable {
         lastGlucoseMgDL: UInt16? = nil,
         warmupDurationMinutes: Int? = nil,
         wearDurationMinutes: Int? = nil,
+        productType: UInt8? = nil,
         securityVersion: UInt16? = nil,
         region: UInt8? = nil
     ) throws {
@@ -39,6 +41,7 @@ public struct Libre3SensorState: Equatable, Sendable {
         self.lastGlucoseMgDL = lastGlucoseMgDL
         self.warmupDurationMinutes = warmupDurationMinutes.map { max(0, $0) }
         self.wearDurationMinutes = wearDurationMinutes.map { max(0, $0) }
+        self.productType = productType
         self.securityVersion = securityVersion
         self.region = region
     }
@@ -54,6 +57,7 @@ public struct Libre3SensorState: Equatable, Sendable {
             lastGlucoseMgDL: mgDL,
             warmupDurationMinutes: warmupDurationMinutes,
             wearDurationMinutes: wearDurationMinutes,
+            productType: productType,
             securityVersion: securityVersion,
             region: region
         )
@@ -62,7 +66,7 @@ public struct Libre3SensorState: Equatable, Sendable {
     /// Persist the sensor's warmup/wear cycle taken from the NFC patch info, so
     /// reconnects (which do not re-scan NFC) can build lifecycle from the
     /// sensor's reported durations rather than the assumed defaults.
-    /// Also retain the security version and region for pairing identity selection.
+    /// Also retain product type, security version and region for pairing identity selection.
     public func applyingSensorCycle(from patchInfo: Libre3NFCPatchInfo) throws -> Libre3SensorState {
         try Libre3SensorState(
             serialNumber: serialNumber,
@@ -74,6 +78,7 @@ public struct Libre3SensorState: Equatable, Sendable {
             lastGlucoseMgDL: lastGlucoseMgDL,
             warmupDurationMinutes: Int(patchInfo.warmupMinutes),
             wearDurationMinutes: Int(patchInfo.wearDurationMinutes),
+            productType: patchInfo.productType,
             securityVersion: patchInfo.securityVersion,
             region: patchInfo.region
         )
@@ -109,6 +114,7 @@ public enum Libre3SensorStateLoader {
         let lastGlucoseMgDL: UInt16?
         let warmupDurationMinutes: Int?
         let wearDurationMinutes: Int?
+        let productType: UInt8?
         let securityVersion: UInt16?
         let region: UInt8?
     }
@@ -140,6 +146,7 @@ public enum Libre3SensorStateLoader {
             lastGlucoseMgDL: decoded.lastGlucoseMgDL,
             warmupDurationMinutes: decoded.warmupDurationMinutes,
             wearDurationMinutes: decoded.wearDurationMinutes,
+            productType: decoded.productType,
             securityVersion: decoded.securityVersion,
             region: decoded.region
         )
@@ -156,6 +163,7 @@ public enum Libre3SensorStateLoader {
             lastGlucoseMgDL: state.lastGlucoseMgDL,
             warmupDurationMinutes: state.warmupDurationMinutes,
             wearDurationMinutes: state.wearDurationMinutes,
+            productType: state.productType,
             securityVersion: state.securityVersion,
             region: state.region
         )
