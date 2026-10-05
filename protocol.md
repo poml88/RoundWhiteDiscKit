@@ -29,8 +29,13 @@ Apps should persist enough state to reconnect without repeating onboarding:
 - Sensor serial number.
 - BLE address returned by NFC.
 - 4-byte BLE PIN returned by NFC.
+- Product type, security version, and raw region for phone identity selection.
 - Last accepted realtime glucose life count and value.
 - Lifecycle metadata as more fields become named.
+
+`Libre3SensorState` stores `productType`, `securityVersion`, and `region` as
+optional JSON fields. Existing files without them still load, but need a new
+NFC scan before identity selection.
 
 The receiver ID is the protocol identity value used in the NFC activation or
 switch command. A LibreView account is not required by the protocol paths
@@ -50,7 +55,7 @@ with NFC error `0xB1`. Two folds are known, exposed as
 The `libreByAbbott` fold was reverse-engineered and confirmed on live hardware
 on 2026-08-19: a US Libre 3 Plus (firmware 1.4.2.30) activated in that app,
 paired in Parallel mode, completed the full first-pair handshake through Phase 6
-and streamed. The `03 03` v1 certificate path covers these sensors unchanged.
+and streamed using the earlier `03 03` identity path.
 
 Because that fold sums four-byte words, permutations of complete four-byte
 chunks collide; byte order within a word still matters. This weak structure
@@ -87,11 +92,25 @@ Known fields in the normalized response:
 
 | Offset | Size | Meaning |
 | --- | ---: | --- |
+| 3 | 2 | Security version, little-endian |
+| 5 | 2 | Localization, little-endian: low byte region, high byte subregion |
+| 7 | 2 | Generation, little-endian (`0` Libre 3, `1` Libre 3 Plus) |
 | 9 | 2 | Wear duration / life count in minutes, little-endian |
-| 12 | 1 | Raw status byte |
-| 13 | 4 | Firmware version bytes, displayed as `b13.b14.b15.b16` |
+| 11 | 4 | Firmware version bytes, displayed as `b14.b13.b12.b11` |
+| 15 | 1 | Product type |
+| 16 | 1 | Warmup duration in 5-minute units |
 | 17 | 1 | Sensor state byte |
 | 18 | 9 | ASCII sensor serial number |
+| 27 | 2 | Trailing CRC/raw checksum |
+
+Offsets count from the normalized frame, including `00 a5`. Normalization adds
+a missing leading `00` and removes repeated `a5` padding before the body.
+`Libre3NFCPatchInfo` exposes both the original input and normalized bytes.
+
+Known `Libre3SensorRegion` values are `0` unknown, `1` European, `2` USA,
+`4` Australian/Canadian, and `8` eastern ROW. The parser keeps the raw UInt8
+region even when it has no enum case. Generation and product type are separate
+fields; identity selection uses product type, security version, and region.
 
 The current command choice rule is:
 
@@ -222,12 +241,21 @@ The signature is standard ECDSA-P256(SHA-256), raw `r || s`, over
 `header || sensor_static_public_key`. RoundWhiteDiscKit verifies it with the bundled
 Abbott patch-signing public keys before accepting the static public key.
 
-The implementation derives:
+The Phase 5 key derivation uses:
 
-- `ECDH(phone_ephemeral_private, sensor_static_public)`
 - `ECDH(phone_ephemeral_private, sensor_ephemeral_public)`
+- `ECDH(phone_static_private, sensor_static_public)`
 
-Those shared secrets feed the later key material.
+Each raw shared secret is a 32-byte big-endian x-coordinate. With the
+ephemeral secret first, the key is:
+
+```text
+phase5Key = SHA-256(00 00 00 01 || ephemeralSecret || staticSecret)[0..<16]
+```
+
+There is no additional KDF input. The 16-byte result drives standard AES-CCM
+for both Phase 5 and Phase 6. The full handshake returns this key alongside
+the verified handshake/session result; it does not return the static ECDH secret.
 
 ### Command-Gated Sequence
 
@@ -245,28 +273,47 @@ The modeled full command sequence is:
 | 7 | `0x11` StartAuthorization | Prefix `0x08` ChallengeLoadDone | Sensor notifies R1 challenge |
 | 8 | `0x08` SendChallengeLoadDone | Prefix `0x08` PatchChallengeLoadDone | Sensor notifies Phase 6 |
 
-### First-Pair Certificate And Phase 5 Source
+### Phone Identity Selection
 
-Initial (fresh) pairing has two extra constraints beyond the command sequence
-above, both confirmed against live sensors:
+The full API is
+`PairingFlow.runCommandGatedAuthorizationHandshake(blePIN:identity:)`, used for
+initial pairing and full reconnect/recovery authorization. Construct a new flow
+for each full authorization with the selected identity's phone certificate and
+a fresh plain P-256 ephemeral keypair. The handshake checks that the identity
+and flow certificates match before sending traffic.
 
-- **Certificate family.** The phone certificate must be the `03 03` family
-  (`phone_cert_162b` in the runtime-tables blob), loadable via `PhoneCert.bundled162b()`. The `03 00`
-  candidate (`phone_cert_firstpair`, `PhoneCert.bundledFirstPair()`) is
-  rejected by live fresh sensors and is kept only for tests. The `03 03` prefix
-  selects the index-1 native static-scalar window for Phase 5. The `03 03` cert
-  is byte-exact Juggluco's public `LIBRE3_APP_CERTIFICATES_B[1]` — a universal
-  static artifact, not per-user material — so the package bundles it directly
-  and integrations no longer need to vendor their own copy.
-- **Native-ephemeral coupling.** The phone ephemeral public key and the Phase 5
-  key source must derive from the same native entropy. Generate them together
-  with `SessionKey.makeFirstPairNativeEphemeral(entropySource:)`, pass the
-  returned keypair as the flow's `phoneEph`, and feed the returned entropy back
-  into `PairingFlow.runCommandGatedFirstPairHandshake(...)`. A random ephemeral
-  does not reach a verified Phase 6.
+`Libre3PairingIdentities` groups entries by `productType` and `securityVersion`.
+Its `identity(productType:securityVersion:region:)` returns the first explicit
+region match in that group, otherwise its default entry. Unknown or unlisted
+regions use the default. Each group must have exactly one default; an absent
+group throws `noIdentity`. The returned `Entry` provides a label for recording
+which identity the sensor accepts; pass `entry.identity` to the handshake.
+The package selects one identity and does not retry with another.
 
-This is the path used by shipping integrations for live first-pair; cached
-reconnect (below) does not send a certificate or ephemeral at all.
+The optional file is
+`Sources/RoundWhiteDiscKit/Resources/RWDKAppIdentities.json`, copied into
+`Bundle.module` when supplied and git-ignored for now. Its top level contains
+`format` (`1`), `curve` (`"P-256"`), and an `identities` array. Each entry has:
+
+| Field | Type / meaning |
+| --- | --- |
+| `label` | String identifying the entry in logs |
+| `productType` | UInt8 NFC product type |
+| `securityVersion` | UInt16 NFC security version |
+| `regions` | Array of raw UInt8 region values |
+| `default` | Bool; exactly one true per product/security-version group |
+| `privateKeyHex` | Hex-encoded 32-byte big-endian P-256 private scalar |
+| `certificateHex` | Hex-encoded 162-byte phone certificate |
+
+Hex is case-insensitive, nonempty, even-length, and contains no whitespace.
+Loading validates the file format, curve, default counts, and that each private
+key produces its certificate's public key. `bundled()` throws
+`identityFileMissing` if the resource is absent. Apps may supply their own JSON
+or validated entries instead. Keep private keys and certificate contents out
+of logs, documentation, and tests.
+
+A sensor paired using the old `03 03` identity needs a new NFC scan before
+authorizing with the selected plain identity.
 
 ### Cached Direct Reconnect
 
@@ -282,8 +329,15 @@ and ephemeral exchange and starts directly at authorization:
 RoundWhiteDiscKit exposes this as `PairingFlow.runCachedReconnectPreamble(...)` and
 `PairingFlow.runCachedReconnectHandshake(...)`. If the cached/direct path is
 rejected before Phase 6, integrations should fall back to the full command-gated
-authorization sequence above. For saved kAuth state, the cached Phase 5 raw key
-is exposed by `Child23KAuthImport.phase5RawKey(forKAuthBlob:)`.
+authorization sequence above.
+
+The handshake takes the saved BLE PIN as `tail4` and the plain `phase5Key` from
+the most recent successful full authorization. Its ephemeral ECDH input makes
+the key new on each full authorization, so only the latest key can be valid
+for a cached attempt.
+
+Acceptance of the plain key on the cached path is not yet confirmed on a live
+sensor.
 
 ### Phase 5 Phone Challenge
 

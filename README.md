@@ -30,38 +30,75 @@ This repo contains:
 The public app does not ship captured per-sensor state. Local files such as
 `Libre3PatchContext.xml` and `Libre3SensorState.json` are ignored.
 
-## Build
+## Pairing Setup
 
-The package contains no data files. Put the original runtime-table `.bin`
-files in `RemoteTables/source/` (git-ignored), then:
+Pairing uses plain P-256 identities and standard AES-CCM. The package no longer
+requires a runtime-table blob or an installation call.
 
-```sh
-Scripts/build_runtime_tables_blob.py   # writes RemoteTables/roundwhitedisckit-runtime-tables-v3.xz
-swift test
-```
+The optional identity file lives at
+`Sources/RoundWhiteDiscKit/Resources/RWDKAppIdentities.json` and is copied into
+the package resource bundle when supplied. It is git-ignored for now. Keep its
+private keys and certificate contents out of logs, documentation, and tests.
 
-## Runtime Tables
+The JSON format has three top-level fields:
 
-Every lookup table (and the two phone certs) ships in a single ~1 MB xz blob
-that the host app fetches and installs before any pairing or authorization
-call:
+| Field | Value |
+| --- | --- |
+| `format` | `1` |
+| `curve` | `"P-256"` |
+| `identities` | Array of identity entries |
+
+Each entry contains `label` (String), `productType` (UInt8), `securityVersion`
+(UInt16), `regions` (array of UInt8), `default` (Bool), `privateKeyHex` (32-byte
+big-endian P-256 private scalar), and `certificateHex` (162-byte phone
+certificate). Hex strings must be nonempty, even-length hexadecimal without
+whitespace; either letter case is accepted. Loading checks that each private
+key matches its certificate's public key and that each product/security-version
+group has exactly one default.
+
+`Libre3PairingIdentities.bundled()` loads the file or throws
+`identityFileMissing` if it is absent. Apps may instead use
+`Libre3PairingIdentities(jsonData:)` or construct validated entries from their
+own identities. Synthetic tests do not require the real file; the bundled-file
+test skips when it is missing.
+
+### Identity Selection And Full Authorization
+
+NFC patch info exposes `productType`, `securityVersion`, and the raw `region`
+byte. Selection first finds the product/security-version group, then an explicit
+region match, otherwise that group's default. Unknown and unlisted regions are
+preserved and use the default. An unsupported group throws `noIdentity`.
+The package selects one identity and does not retry with another.
+
+Given parsed `patchInfo` and a loaded registry:
 
 ```swift
-try RoundWhiteDiscKit.installRuntimeTables(blobData)
+let entry = try identities.identity(
+    productType: patchInfo.productType,
+    securityVersion: patchInfo.securityVersion,
+    region: patchInfo.region
+)
 ```
 
-The blob stores one shared library image (four of the large tables are
-overlapping windows of it) plus byte patches, and the remaining tables by name.
-The SHA-256 of the decompressed payload is pinned in `RuntimeTables.swift`, so
-a build accepts only the blob it was made for. Crypto entry points throw
-`RuntimeTablesError.notInstalled` until it is installed. Rebuilding the blob
-prints the new payload digest; update `expectedPayloadSHA256` to match.
-Tests that need the tables skip when the blob is absent, or read
-`$ROUNDWHITEDISCKIT_RUNTIME_TABLES`.
+The returned entry includes `label` for logging which identity the sensor
+accepts. Create a new `PairingFlow` with `entry.identity.phoneCert` for each full
+authorization so it uses a fresh ephemeral keypair, then call
+`runCommandGatedAuthorizationHandshake(blePIN:identity:)` with `entry.identity`
+and the NFC BLE PIN. This full flow is also used for saved-state authorization.
 
-To work on the iOS PoC app, build the blob, then open `Apps/RoundWhiteDisc/RoundWhiteDisc.xcodeproj` in Xcode
-(the app bundles the blob as a stand-in for fetching it remotely).
-The app target uses the package at the repo root as a local Swift package.
+The Phase 5 key is the first 16 bytes of:
+
+```text
+SHA-256(00 00 00 01 || ECDH(phone_ephemeral, sensor_ephemeral)
+                     || ECDH(phone_static, sensor_static))
+```
+
+Both ECDH inputs are 32-byte big-endian shared secrets. The order is fixed,
+with no additional KDF input. Phase 5 and Phase 6 use this key with standard
+AES-CCM and verify the echoed R1/R2 before accepting session material.
+
+For package validation, run `swift build` and `swift test` on a supported Apple
+platform.
 
 ## Current Library Boundary
 
@@ -117,7 +154,14 @@ Apps that support sensor recovery should persist and expose at least:
 - Sensor serial number.
 - BLE address returned by NFC.
 - Latest BLE PIN returned by NFC.
+- `productType`, `securityVersion`, and raw `region` from NFC patch info, for
+  identity selection on a later reconnect.
 - Sensor start / lifecycle metadata once the remaining fields are named.
+
+`Libre3SensorState` persists the three selection fields as optional values.
+Older JSON files still load with them absent; scan NFC again to obtain missing
+metadata. Sensors paired with the old `03 03` identity also need a new NFC scan
+before authorizing with the selected plain identity.
 
 If a user loses the original phone, a new install can accept the saved
 `receiverID` before scanning the active sensor. Active-sensor recovery then uses
@@ -211,6 +255,9 @@ and records scene/restoration/connection lifecycle events in-app. Temperature is
 shown as the currently grounded raw field (`tempRaw`) until its unit/calibration
 is confirmed.
 
+The app has not yet been migrated to the plain pairing API and does not build
+with the current package.
+
 ## Background Lifecycle Behavior
 
 The four live-device behaviors that the library is shaped around have been
@@ -264,22 +311,27 @@ repeating NFC activation/switch unless the saved state is missing, seed
 `Libre3DataPlaneState` from the saved last glucose point, and request bounded
 backfill instead of draining all available history.
 
-Pristine post-pairing captures show two reconnect shapes:
+The package exposes two reconnect shapes:
 
 - Cached/direct reconnect: `0x11 StartAuthorization`, R1/nonce notify, Phase 5
   write, `0x08 SendChallengeLoadDone`, then `0843` + Phase 6. RoundWhiteDiscKit exposes
   this as `runCachedReconnectPreamble` and `runCachedReconnectHandshake`.
-  Callers that persist the raw kAuth blob can derive the cached Phase 5 raw key
-  with `Child23KAuthImport.phase5RawKey(forKAuthBlob:)`.
+  The handshake takes `tail4` (the saved BLE PIN) and the plain `phase5Key`
+  returned by the most recent successful full authorization.
 - Full fallback authorization: certificate exchange, ephemeral exchange,
   `StartAuthorization`, Phase 5, and Phase 6. RoundWhiteDiscKit exposes this as
   `runCommandGatedAuthorizationPreamble` and
-  `runCommandGatedAuthorizationHandshake`. The older first-pair method names
-  remain for compatibility.
+  `runCommandGatedAuthorizationHandshake(blePIN:identity:)`.
 
-The cached/direct path is the preferred saved-state reconnect attempt when the
-integration has accepted Phase 5 material for that sensor/receiver state. If it
-is rejected before Phase 6, fall back to the full authorization path.
+The Phase 5 key includes ephemeral ECDH, so it changes with each full
+authorization. After every successful full authorization, store
+`result.phase5Key` in the app's Keychain for that sensor, replacing the previous
+key. Do not put it in JSON sensor state. If the sensor accepts cached reconnect,
+only the key from the most recent full authorization can be valid.
+
+Acceptance of the plain key on the cached path is not yet confirmed on a live
+sensor. When a saved key is available, try the cached path; if it fails, fall
+back to full authorization. Without a saved key, use full authorization directly.
 
 ## License
 
