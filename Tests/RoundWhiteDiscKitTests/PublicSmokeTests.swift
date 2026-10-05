@@ -1,4 +1,5 @@
 import XCTest
+import CryptoKit
 @testable import RoundWhiteDiscKit
 
 final class PublicSmokeTests: XCTestCase {
@@ -41,36 +42,51 @@ final class PublicSmokeTests: XCTestCase {
         )
     }
 
-    func testAuthorizationHandshakeRejectsNonFourByteTailBeforeTransportUse() async throws {
-        let flow = try PairingFlow(
+    func testAuthorizationHandshakeRejectsNonFourBytePINBeforeTransportUse() async throws {
+        let identity = try dummyIdentity()
+        let flow = PairingFlow(
             transport: FailingCommandPairingTransport(),
-            phoneCert: dummyPhoneCert()
+            phoneCert: identity.phoneCert
         )
 
         do {
             _ = try await flow.runCommandGatedAuthorizationHandshake(
-                tail4: Data([0x01, 0x02, 0x03]),
-                phase5RawKeyProvider: { _ in Data(repeating: 0, count: 16) }
+                blePIN: Data([0x01, 0x02, 0x03]),
+                identity: identity
             )
-            XCTFail("Expected tail4 size validation failure")
-        } catch PairingFlowError.tail4WrongSize(let count) {
+            XCTFail("Expected BLE PIN size validation failure")
+        } catch PairingFlowError.blePINWrongSize(let count) {
             XCTAssertEqual(count, 3)
         } catch {
             XCTFail("Unexpected error \(error)")
         }
     }
 
+    func testCachedReconnectHandshakeRejectsInvalidKeyBeforeTransportUse() async throws {
+        let flow = PairingFlow(transport: FailingCommandPairingTransport())
+        do {
+            _ = try await flow.runCachedReconnectHandshake(
+                tail4: Data([0x01, 0x02, 0x03, 0x04]),
+                phase5Key: Data(count: 15)
+            )
+            XCTFail("Expected Phase 5 key size validation failure")
+        } catch ChallengeError.wrongKeySize(let count) {
+            XCTAssertEqual(count, 15)
+        } catch {
+            XCTFail("Unexpected error \(error)")
+        }
+    }
+
     func testCachedReconnectHandshakeSkipsCertAndEphemeralExchange() async throws {
-        try installRuntimeTablesForTests()
         let sensorR1 = Data((0x10..<0x20).map(UInt8.init))
         let challengeNonce = Data([0x21, 0x04, 0x00, 0x00, 0x8f, 0x8c, 0x4b])
         let phase6Nonce = Data([0x22, 0x04, 0x00, 0x00, 0x7f, 0x43, 0x8e])
         let phoneR2 = Data((0x30..<0x40).map(UInt8.init))
         let tail4 = Data([0x32, 0x25, 0xec, 0x72])
-        let phase5RawKey = Data((0x40..<0x50).map(UInt8.init))
+        let phase5Key = Data((0x40..<0x50).map(UInt8.init))
         let kEnc = Data((0x50..<0x60).map(UInt8.init))
         let ivEnc = Data((0x60..<0x68).map(UInt8.init))
-        let aes = try LibAES.phase5BlockEncryptor(rawKey: phase5RawKey)
+        let aes = AESCCM.commonCryptoBlockEncrypt(key: phase5Key)
         let phase6Plaintext = phoneR2 + sensorR1 + kEnc + ivEnc
         let (phase6Ciphertext, phase6Tag) = try AESCCM.encrypt(
             nonce: phase6Nonce,
@@ -92,11 +108,7 @@ final class PublicSmokeTests: XCTestCase {
 
         let result = try await flow.runCachedReconnectHandshake(
             tail4: tail4,
-            phase5RawKeyProvider: { preamble in
-                XCTAssertEqual(preamble.sensorR1, sensorR1)
-                XCTAssertEqual(preamble.nonce7, challengeNonce)
-                return phase5RawKey
-            },
+            phase5Key: phase5Key,
             r2Provider: { phoneR2 }
         )
 
@@ -125,23 +137,6 @@ final class PublicSmokeTests: XCTestCase {
         XCTAssertFalse(try cert.verifyECDSA(with: Libre3PatchSigningKey.level0))
         XCTAssertTrue(try cert.verifyECDSA(with: Libre3PatchSigningKey.level1))
         XCTAssertEqual(try cert.verifiedSigningKeyIndex(), 1)
-    }
-
-    func testBundled162bCertIsLiveFirstPairFamilyAndEngagesPhase5Override() throws {
-        try installRuntimeTablesForTests()
-        let cert = try PhoneCert.bundled162b()
-
-        XCTAssertEqual(cert.raw.count, PhoneCert.totalSize)
-        XCTAssertTrue(cert.raw.prefix(2).elementsEqual([0x03, 0x03]))
-        XCTAssertEqual(cert.staticPub.first, 0x04)
-        XCTAssertEqual(
-            cert.phase5StaticScalarWindowOverride,
-            FirstPairStaticScalarWindow.firstPairIndex1
-        )
-
-        let firstPair = try PhoneCert.bundledFirstPair()
-        XCTAssertTrue(firstPair.raw.prefix(2).elementsEqual([0x03, 0x00]))
-        XCTAssertNil(firstPair.phase5StaticScalarWindowOverride)
     }
 
     func testRealtimeQualityFieldsGateUsability() throws {
@@ -298,10 +293,10 @@ final class PublicSmokeTests: XCTestCase {
         ])
     }
 
-    private func dummyPhoneCert() throws -> PhoneCert {
-        var bytes = [UInt8](repeating: 0, count: PhoneCert.totalSize)
-        bytes[PhoneCert.pubkeyRange.lowerBound] = 0x04
-        return try PhoneCert(raw: Data(bytes))
+    private func dummyIdentity() throws -> PlainPairingIdentity {
+        let key = P256.KeyAgreement.PrivateKey()
+        let raw = Data([0x03, 0x00]) + Data(count: 31) + key.publicKey.x963Representation + Data(count: 64)
+        return try PlainPairingIdentity(phoneCert: PhoneCert(raw: raw), staticPrivateKey: key)
     }
 
     private func decodedPacket(
@@ -339,24 +334,24 @@ final class PublicSmokeTests: XCTestCase {
     }
 }
 
-private final class FailingCommandPairingTransport: CommandPairingTransport, @unchecked Sendable {
+private actor FailingCommandPairingTransport: CommandPairingTransport {
     func write(_ message: Data, to characteristic: BleCharRef) async throws {
-        XCTFail("Transport should not be used before tail4 validation")
+        XCTFail("Transport should not be used before input validation")
         throw UnexpectedTransportUse()
     }
 
     func awaitNotify(on characteristic: BleCharRef, exactly n: Int) async throws -> Data {
-        XCTFail("Transport should not be used before tail4 validation")
+        XCTFail("Transport should not be used before input validation")
         throw UnexpectedTransportUse()
     }
 
     func writeCommand(_ command: UInt8) async throws {
-        XCTFail("Transport should not be used before tail4 validation")
+        XCTFail("Transport should not be used before input validation")
         throw UnexpectedTransportUse()
     }
 
     func awaitCommandResponse(timeout: TimeInterval) async throws -> Data {
-        XCTFail("Transport should not be used before tail4 validation")
+        XCTFail("Transport should not be used before input validation")
         throw UnexpectedTransportUse()
     }
 }

@@ -62,10 +62,11 @@ final class PlainFirstPairTests: XCTestCase {
         let flow = PairingFlow(
             transport: sensor,
             phoneCert: identity.phoneCert,
+            phoneEph: EphemeralKeyPair(privateKey: P256.KeyAgreement.PrivateKey()),
             sensorCertSigningKeys: []
         )
 
-        let result = try await flow.runCommandGatedPlainFirstPairHandshake(
+        let result: CommandGatedAuthorizationHandshakeResult = try await flow.runCommandGatedAuthorizationHandshake(
             blePIN: blePIN,
             identity: identity
         )
@@ -77,6 +78,17 @@ final class PlainFirstPairTests: XCTestCase {
         XCTAssertEqual(result.handshake.sessionMaterial.sensorR1, sensor.r1)
         let commands = await sensor.commandWrites
         XCTAssertEqual(commands, [0x01, 0x02, 0x03, 0x09, 0x0d, 0x0e, 0x11, 0x08])
+
+        // Reconnect with only the saved plain key; no certificate is configured.
+        let reconnectFlow = PairingFlow(transport: sensor)
+        let reconnect = try await reconnectFlow.runCachedReconnectHandshake(
+            tail4: blePIN,
+            phase5Key: result.phase5Key
+        )
+        XCTAssertEqual(reconnect.sessionMaterial.kEnc, sensor.kEnc)
+        XCTAssertEqual(reconnect.sessionMaterial.ivEnc, sensor.ivEnc)
+        let reconnectCommands = await sensor.commandWrites
+        XCTAssertEqual(reconnectCommands, commands + [0x11, 0x08])
     }
 
     func testPlainFirstPairFailsWhenSensorUsesOtherOrder() async throws {
@@ -89,7 +101,7 @@ final class PlainFirstPairTests: XCTestCase {
         )
 
         do {
-            _ = try await flow.runCommandGatedPlainFirstPairHandshake(
+            _ = try await flow.runCommandGatedAuthorizationHandshake(
                 blePIN: blePIN,
                 identity: identity
             )
@@ -100,28 +112,27 @@ final class PlainFirstPairTests: XCTestCase {
         XCTAssertTrue(rejected)
     }
 
-    func testPlainFirstPairRejectsNativeEphemeral() async throws {
+    func testAuthorizationRejectsMismatchedCertificateBeforeTransportUse() async throws {
         let identity = try Self.makeIdentity()
-        let nativeStyle = try EphemeralKeyPair(
-            nativeScalarWindowLE: Data(P256.KeyAgreement.PrivateKey().rawRepresentation.reversed()),
-            publicKey65Override: P256.KeyAgreement.PrivateKey().publicKey.x963Representation
-        )
+        let otherIdentity = try Self.makeIdentity()
+        let sensor = SimulatedPlainSensor(blePIN: blePIN)
         let flow = PairingFlow(
-            transport: SimulatedPlainSensor(blePIN: blePIN),
-            phoneCert: identity.phoneCert,
-            phoneEph: nativeStyle,
+            transport: sensor,
+            phoneCert: otherIdentity.phoneCert,
             sensorCertSigningKeys: []
         )
 
         do {
-            _ = try await flow.runCommandGatedPlainFirstPairHandshake(
+            _ = try await flow.runCommandGatedAuthorizationHandshake(
                 blePIN: blePIN,
                 identity: identity
             )
-            XCTFail("A native-style ephemeral must be rejected before any wire traffic")
+            XCTFail("A different phone certificate must be rejected before any wire traffic")
         } catch let error as PlainPairingError {
-            XCTAssertEqual(error, .phoneEphemeralIsNotPlain)
+            XCTAssertEqual(error, .staticPrivateKeyDoesNotMatchCertificate)
         }
+        let commands = await sensor.commandWrites
+        XCTAssertTrue(commands.isEmpty)
     }
 
     private static func makeIdentity() throws -> PlainPairingIdentity {

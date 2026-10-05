@@ -9,9 +9,6 @@ public enum PlainPairingError: Error, Equatable {
     case invalidStaticPrivateKey
     /// The private key does not produce the certificate's static public key.
     case staticPrivateKeyDoesNotMatchCertificate
-    /// The flow's phone ephemeral public key is not `privateKey * G`, e.g. a
-    /// native first-pair ephemeral whose public point is built separately.
-    case phoneEphemeralIsNotPlain
     case invalidSharedSecretLength(Int)
 }
 

@@ -98,25 +98,6 @@ public struct FirstPairPhase5KeyMaterial: Equatable, Sendable {
     }
 }
 
-public struct FirstPairNativeEphemeralMaterial: Sendable {
-    public let keyPair: EphemeralKeyPair
-    public let nullEntropy11A: Data
-    public let nullScalarWindow: Data
-    public let attempts: Int
-
-    public init(
-        keyPair: EphemeralKeyPair,
-        nullEntropy11A: Data,
-        nullScalarWindow: Data,
-        attempts: Int
-    ) {
-        self.keyPair = keyPair
-        self.nullEntropy11A = nullEntropy11A
-        self.nullScalarWindow = nullScalarWindow
-        self.attempts = attempts
-    }
-}
-
 public enum SessionKeyError: Error {
     /// Returned by `derive` until the empirical construction is pinned
     /// down. The capture path that will resolve this lives at
@@ -126,33 +107,6 @@ public enum SessionKeyError: Error {
 }
 
 public enum SessionKey {
-
-    /// Generate the Phase 3 phone material in the same way native first-pair
-    /// does: sample the accepted null-branch entropy, derive the native
-    /// null scalar for Phase 5, and send the `process2(5)` fixed-point public
-    /// point derived from that same entropy.
-    public static func makeFirstPairNativeEphemeral(
-        maxAttempts: Int = 64,
-        entropySource: (Int) throws -> Data
-    ) throws -> FirstPairNativeEphemeralMaterial {
-        let result = try FirstPairSourceSlice.builder633fa8NullScalarWindowFromEntropySource(
-            maxAttempts: maxAttempts,
-            entropySource: entropySource
-        )
-        let publicKey65 = try FirstPairSourceSlice.builderProcess2P5PublicKey65FromEntropy(
-            entropy11A: result.entropy11A
-        )
-        let keyPair = try EphemeralKeyPair(
-            nativeScalarWindowLE: result.scalarWindow,
-            publicKey65Override: publicKey65
-        )
-        return FirstPairNativeEphemeralMaterial(
-            keyPair: keyPair,
-            nullEntropy11A: result.entropy11A,
-            nullScalarWindow: result.scalarWindow,
-            attempts: result.attempts
-        )
-    }
 
     /// Derive the 16-byte session key from the Phase 1-4 ECDH outputs +
     /// any protocol-side material. Currently throws `.notYetSpecified`
@@ -205,59 +159,8 @@ public enum SessionKey {
         return try material(from: seeds)
     }
 
-    public static func deriveFirstPairPhase5Source(
-        preamble: FirstPairPreambleResult,
-        nullEntropy11A: Data,
-        entrySource: Data = FirstPairSourceSlice.bundled6388f0LowSeedEntrySource,
-        staticScalarWindow: Data? = nil
-    ) throws -> Data {
-        try deriveFirstPairPhase5Source(
-            FirstPairPhase5KeyInputs(
-                entrySource: entrySource,
-                nullEntropy11A: nullEntropy11A,
-                sensorEphemeralPub65: preamble.phaseHandshake.sensorEphPub.x963Representation,
-                sensorStaticPub65: preamble.phaseHandshake.sensorCert.staticPub,
-                staticScalarWindow: staticScalarWindow ??
-                    preamble.phaseHandshake.phoneCert.phase5StaticScalarWindowOverride
-            )
-        )
-    }
-
     public static func deriveFirstPairPhase5RawKey(_ inputs: FirstPairPhase5KeyInputs) throws -> Data {
         try deriveFirstPairPhase5Material(inputs).rawKey
-    }
-
-    public static func deriveFirstPairPhase5RawKey(
-        preamble: FirstPairPreambleResult,
-        nullEntropy11A: Data,
-        entrySource: Data = FirstPairSourceSlice.bundled6388f0LowSeedEntrySource,
-        staticScalarWindow: Data? = nil
-    ) throws -> Data {
-        let source = try deriveFirstPairPhase5Source(
-            preamble: preamble,
-            nullEntropy11A: nullEntropy11A,
-            entrySource: entrySource,
-            staticScalarWindow: staticScalarWindow
-        )
-        return try Phase5KeySchedule.deriveRawKey(input66: source)
-    }
-
-    public static func deriveFirstPairPhase5Material(
-        preamble: FirstPairPreambleResult,
-        nullEntropy11A: Data,
-        entrySource: Data = FirstPairSourceSlice.bundled6388f0LowSeedEntrySource,
-        staticScalarWindow: Data? = nil
-    ) throws -> FirstPairPhase5KeyMaterial {
-        try deriveFirstPairPhase5Material(
-            FirstPairPhase5KeyInputs(
-                entrySource: entrySource,
-                nullEntropy11A: nullEntropy11A,
-                sensorEphemeralPub65: preamble.phaseHandshake.sensorEphPub.x963Representation,
-                sensorStaticPub65: preamble.phaseHandshake.sensorCert.staticPub,
-                staticScalarWindow: staticScalarWindow ??
-                    preamble.phaseHandshake.phoneCert.phase5StaticScalarWindowOverride
-            )
-        )
     }
 
     public static func deriveFirstPairPhase5Material(
@@ -301,24 +204,6 @@ public enum SessionKey {
             )
         }
         return try material(from: seeds)
-    }
-
-    public static func deriveFirstPairPhase5Material(
-        preamble: FirstPairPreambleResult,
-        entrySource: Data = FirstPairSourceSlice.bundled6388f0LowSeedEntrySource,
-        staticScalarWindow: Data? = nil,
-        maxAttempts: Int = 64,
-        entropySource: (Int) throws -> Data
-    ) throws -> FirstPairPhase5KeyMaterial {
-        try deriveFirstPairPhase5Material(
-            entrySource: entrySource,
-            sensorEphemeralPub65: preamble.phaseHandshake.sensorEphPub.x963Representation,
-            sensorStaticPub65: preamble.phaseHandshake.sensorCert.staticPub,
-            staticScalarWindow: staticScalarWindow ??
-                preamble.phaseHandshake.phoneCert.phase5StaticScalarWindowOverride,
-            maxAttempts: maxAttempts,
-            entropySource: entropySource
-        )
     }
 
     private static func uncompressedPointXYBE(_ point65: Data, label: String) throws -> Data {
