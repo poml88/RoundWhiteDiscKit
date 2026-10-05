@@ -1,10 +1,20 @@
 import Foundation
 
+public enum Libre3SensorRegion: UInt8, Sendable {
+    case unknown = 0
+    case european = 1
+    case usa = 2
+    case australianCanadian = 4
+    case easternROW = 8
+}
+
 public struct Libre3NFCPatchInfo: Sendable, Equatable {
     public let inputRaw: Data
     public let raw: Data
     public let stateByte: UInt8
     public let productType: UInt8
+    public let securityVersion: UInt16
+    public let localization: UInt16
     public let generation: UInt16
     public let wearDurationMinutes: UInt16
     public let warmupMinutes: UInt16
@@ -18,6 +28,8 @@ public struct Libre3NFCPatchInfo: Sendable, Equatable {
         }
         self.inputRaw = raw
         self.raw = frame
+        self.securityVersion = Self.u16(frame, 3)
+        self.localization = Self.u16(frame, 5)
         self.generation = Self.u16(frame, 7)
         self.wearDurationMinutes = Self.u16(frame, 9)
         self.firmwareVersion = "\(Self.byte(frame, 14)).\(Self.byte(frame, 13)).\(Self.byte(frame, 12)).\(Self.byte(frame, 11))"
@@ -27,6 +39,11 @@ public struct Libre3NFCPatchInfo: Sendable, Equatable {
         let serialBytes = frame.subdata(in: (frame.startIndex + 18)..<(frame.startIndex + 27))
         self.serialNumber = String(data: serialBytes, encoding: .ascii) ?? Self.hex(serialBytes)
     }
+
+    /// Keep the raw region byte so values outside `Libre3SensorRegion` survive.
+    public var region: UInt8 { UInt8(localization & 0xff) }
+
+    public var subregion: UInt8 { UInt8(localization >> 8) }
 
     public var recommendedCommandCode: NFCActivationCommandCode {
         stateByte == 0x01 ? .activate : .switchReceiver
@@ -104,7 +121,9 @@ public struct Libre3NFCActivationResponse: Sendable, Equatable {
             receiverID: receiverID,
             source: source,
             warmupDurationMinutes: patchInfo.map { Int($0.warmupMinutes) },
-            wearDurationMinutes: patchInfo.map { Int($0.wearDurationMinutes) }
+            wearDurationMinutes: patchInfo.map { Int($0.wearDurationMinutes) },
+            securityVersion: patchInfo?.securityVersion,
+            region: patchInfo?.region
         )
     }
 }

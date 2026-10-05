@@ -70,6 +70,10 @@ final class NFCActivationCommandTests: XCTestCase {
         XCTAssertEqual(fresh.firmwareVersion, "1.4.2.30")
         XCTAssertEqual(fresh.generation, 1)
         XCTAssertEqual(fresh.productType, 4)
+        XCTAssertEqual(fresh.securityVersion, 1)
+        XCTAssertEqual(fresh.localization, 2)
+        XCTAssertEqual(fresh.region, Libre3SensorRegion.usa.rawValue)
+        XCTAssertEqual(fresh.subregion, 0)
         XCTAssertEqual(fresh.warmupMinutes, 60)
 
         let active = try Libre3NFCPatchInfo(
@@ -82,7 +86,54 @@ final class NFCActivationCommandTests: XCTestCase {
         XCTAssertEqual(active.firmwareVersion, "1.4.2.30")
         XCTAssertEqual(active.generation, 1)
         XCTAssertEqual(active.productType, 4)
+        XCTAssertEqual(active.securityVersion, 1)
+        XCTAssertEqual(active.localization, 2)
+        XCTAssertEqual(active.region, Libre3SensorRegion.usa.rawValue)
+        XCTAssertEqual(active.subregion, 0)
         XCTAssertEqual(active.warmupMinutes, 60)
+    }
+
+    func testEuropeanLibre3PatchInfoMatches0Q0EYMRKNCapture() throws {
+        let normalized = Data(hexString: "00a500010001000000c04e1e020401040c0430513045594d524b4ec434")
+        let coreNFCResponses = [
+            "a5a5a5a5a5a5a5a500010001000000c04e1e020401040c0430513045594d524b4ec434",
+            "a500010001000000c04e1e020401040c0430513045594d524b4ec434",
+        ].map { Data(hexString: $0) }
+
+        for raw in [normalized] + coreNFCResponses {
+            let info = try Libre3NFCPatchInfo(raw: raw)
+            XCTAssertEqual(info.inputRaw, raw)
+            XCTAssertEqual(info.raw, normalized)
+            XCTAssertEqual(info.securityVersion, 1)
+            XCTAssertEqual(info.localization, 0x0001)
+            XCTAssertEqual(info.region, Libre3SensorRegion.european.rawValue)
+            XCTAssertEqual(info.subregion, 0)
+            XCTAssertEqual(info.generation, 0)
+            XCTAssertEqual(info.wearDurationMinutes, 20160)
+            XCTAssertEqual(info.firmwareVersion, "1.4.2.30")
+            XCTAssertEqual(info.productType, 4)
+            XCTAssertEqual(info.warmupMinutes, 60)
+            XCTAssertEqual(info.stateByte, 0x04)
+            XCTAssertEqual(info.recommendedCommandCode, .switchReceiver)
+            XCTAssertEqual(info.serialNumber, "0Q0EYMRKN")
+            XCTAssertEqual(info.raw.suffix(2), Data([0xc4, 0x34]))
+        }
+    }
+
+    func testPatchInfoPairingMetadataUsesNormalizedOffsetsAndPreservesUnknownRegion() throws {
+        // Synthetic version/localization bytes exercise both LE bytes and an
+        // unrecognized region through each supported response normalization.
+        let frame = Data(hexString: "00a50034127fab010060541e020401040c04305252433938394151c6ca")
+        for raw in [frame, Data(frame.dropFirst()), Data([0x00, 0xa5, 0xa5, 0xa5]) + frame.dropFirst(2)] {
+            let info = try Libre3NFCPatchInfo(raw: raw)
+            XCTAssertEqual(info.raw, frame)
+            XCTAssertEqual(info.securityVersion, 0x1234)
+            XCTAssertEqual(info.localization, 0xab7f)
+            XCTAssertEqual(info.region, 0x7f)
+            XCTAssertEqual(info.subregion, 0xab)
+            XCTAssertNil(Libre3SensorRegion(rawValue: info.region))
+            XCTAssertEqual(info.generation, 1)
+        }
     }
 
     func testPatchInfoParserAcceptsCoreNFCResponseParameters() throws {
@@ -92,6 +143,8 @@ final class NFCActivationCommandTests: XCTestCase {
         XCTAssertEqual(response.raw.hex, "00a50001000200010060541e020401040c04305252433938394151c6ca")
         XCTAssertEqual(response.serialNumber, "0RRC989AQ")
         XCTAssertEqual(response.stateByte, 0x04)
+        XCTAssertEqual(response.securityVersion, 1)
+        XCTAssertEqual(response.region, Libre3SensorRegion.usa.rawValue)
     }
 
     func testPatchInfoParserCollapsesRepeatedA5PadFromCoreNFC() throws {
@@ -103,6 +156,8 @@ final class NFCActivationCommandTests: XCTestCase {
         XCTAssertEqual(response.serialNumber, "0RRC989AQ")
         XCTAssertEqual(response.stateByte, 0x04)
         XCTAssertEqual(response.recommendedCommandCode, .switchReceiver)
+        XCTAssertEqual(response.securityVersion, 1)
+        XCTAssertEqual(response.region, Libre3SensorRegion.usa.rawValue)
     }
 
     func testActivationResponseParserUsesCorrectedBlePinBoundary() throws {
@@ -124,6 +179,23 @@ final class NFCActivationCommandTests: XCTestCase {
         XCTAssertEqual(state.blePIN.hex, "3225ec72")
         XCTAssertEqual(state.receiverID?.littleEndianHex, "78830d6f")
         XCTAssertEqual(state.source, "NFC activation response")
+        XCTAssertNil(state.securityVersion)
+        XCTAssertNil(state.region)
+    }
+
+    func testActivationStateKeepsPatchPairingMetadata() throws {
+        let patchInfo = try Libre3NFCPatchInfo(
+            raw: Data(hexString: "00a50001000200010060541e020401040c04305252433938394151c6ca")
+        )
+        let response = try Libre3NFCActivationResponse(
+            raw: Data(hexString: "00a50058f9b8df22cc3225ec7200000000ad06")
+        )
+
+        let state = try response.sensorState(serialNumber: patchInfo.serialNumber, patchInfo: patchInfo)
+        XCTAssertEqual(state.securityVersion, patchInfo.securityVersion)
+        XCTAssertEqual(state.region, patchInfo.region)
+        XCTAssertEqual(state.warmupDurationMinutes, 60)
+        XCTAssertEqual(state.wearDurationMinutes, 21600)
     }
 
     func testSwitchResponseWithOriginalReceiverParsesAsActivationLikePayload() throws {

@@ -16,6 +16,8 @@ final class Libre3SensorStateLoaderTests: XCTestCase {
         XCTAssertEqual(state.source, "test")
         XCTAssertEqual(state.lastGlucoseLifeCount, 1073)
         XCTAssertEqual(state.lastGlucoseMgDL, 151)
+        XCTAssertNil(state.securityVersion)
+        XCTAssertNil(state.region)
     }
 
     func testLoadsRealmBase64BlePIN() throws {
@@ -33,6 +35,16 @@ final class Libre3SensorStateLoaderTests: XCTestCase {
         }
     }
 
+    func testRoundTripsPairingMetadataWithUnknownRegion() throws {
+        let json = Data(#"{"blePIN":"3225ec72","securityVersion":4660,"region":127}"#.utf8)
+
+        let state = try Libre3SensorStateLoader.load(fromJSON: json)
+        XCTAssertEqual(state.securityVersion, 0x1234)
+        XCTAssertEqual(state.region, 0x7f)
+        let encoded = try Libre3SensorStateLoader.jsonData(from: state)
+        XCTAssertEqual(try Libre3SensorStateLoader.load(fromJSON: encoded), state)
+    }
+
     func testEncodesRoundTrippableHexJSON() throws {
         let state = try Libre3SensorState(
             serialNumber: "0RRC989AQ",
@@ -41,7 +53,9 @@ final class Libre3SensorStateLoaderTests: XCTestCase {
             receiverID: Libre3ReceiverID(0x6f0d8378),
             source: "NFC activation response",
             lastGlucoseLifeCount: 1073,
-            lastGlucoseMgDL: 151
+            lastGlucoseMgDL: 151,
+            securityVersion: 1,
+            region: Libre3SensorRegion.european.rawValue
         )
 
         let encoded = try Libre3SensorStateLoader.jsonData(from: state)
@@ -52,13 +66,17 @@ final class Libre3SensorStateLoaderTests: XCTestCase {
         XCTAssertTrue(String(decoding: encoded, as: UTF8.self).contains(#""receiverID" : "78830d6f""#))
         XCTAssertTrue(String(decoding: encoded, as: UTF8.self).contains(#""lastGlucoseLifeCount" : 1073"#))
         XCTAssertTrue(String(decoding: encoded, as: UTF8.self).contains(#""lastGlucoseMgDL" : 151"#))
+        XCTAssertTrue(String(decoding: encoded, as: UTF8.self).contains(#""securityVersion" : 1"#))
+        XCTAssertTrue(String(decoding: encoded, as: UTF8.self).contains(#""region" : 1"#))
     }
 
     func testUpdatesLastGlucoseMetadata() throws {
         let state = try Libre3SensorState(
             serialNumber: "0RRC989AQ",
             blePIN: Data([0x32, 0x25, 0xec, 0x72]),
-            bleAddress: "CC:22:DF:B8:F9:58"
+            bleAddress: "CC:22:DF:B8:F9:58",
+            securityVersion: 1,
+            region: Libre3SensorRegion.european.rawValue
         )
 
         let updated = try state.updatingLastGlucose(lifeCount: 1080, mgDL: 149)
@@ -67,6 +85,8 @@ final class Libre3SensorStateLoaderTests: XCTestCase {
         XCTAssertEqual(updated.blePIN, state.blePIN)
         XCTAssertEqual(updated.lastGlucoseLifeCount, 1080)
         XCTAssertEqual(updated.lastGlucoseMgDL, 149)
+        XCTAssertEqual(updated.securityVersion, state.securityVersion)
+        XCTAssertEqual(updated.region, state.region)
     }
 
     func testPersistsAndRestoresSensorCycle() throws {
@@ -81,11 +101,15 @@ final class Libre3SensorStateLoaderTests: XCTestCase {
         let state = try Libre3SensorState(
             serialNumber: "0RRC989AQ",
             blePIN: Data([0x32, 0x25, 0xec, 0x72]),
-            bleAddress: "CC:22:DF:B8:F9:58"
+            bleAddress: "CC:22:DF:B8:F9:58",
+            securityVersion: 2,
+            region: Libre3SensorRegion.european.rawValue
         ).applyingSensorCycle(from: patchInfo)
 
         XCTAssertEqual(state.warmupDurationMinutes, 60)
         XCTAssertEqual(state.wearDurationMinutes, 21600)
+        XCTAssertEqual(state.securityVersion, 1)
+        XCTAssertEqual(state.region, Libre3SensorRegion.usa.rawValue)
 
         let restored = try Libre3SensorStateLoader.load(
             fromJSON: Libre3SensorStateLoader.jsonData(from: state)
@@ -93,6 +117,8 @@ final class Libre3SensorStateLoaderTests: XCTestCase {
         XCTAssertEqual(restored, state)
         XCTAssertEqual(restored.warmupDurationMinutes, 60)
         XCTAssertEqual(restored.wearDurationMinutes, 21600)
+        XCTAssertEqual(restored.securityVersion, 1)
+        XCTAssertEqual(restored.region, Libre3SensorRegion.usa.rawValue)
 
         // Reconnect (no NFC) builds lifecycle from the persisted cycle.
         let reconnect = Libre3DataPlaneState(sensorState: restored)

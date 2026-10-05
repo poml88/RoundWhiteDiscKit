@@ -10,6 +10,9 @@ public struct Libre3SensorState: Equatable, Sendable {
     public let lastGlucoseMgDL: UInt16?
     public let warmupDurationMinutes: Int?
     public let wearDurationMinutes: Int?
+    public let securityVersion: UInt16?
+    /// Raw NFC region byte, including values outside `Libre3SensorRegion`.
+    public let region: UInt8?
 
     public init(
         serialNumber: String?,
@@ -20,7 +23,9 @@ public struct Libre3SensorState: Equatable, Sendable {
         lastGlucoseLifeCount: UInt16? = nil,
         lastGlucoseMgDL: UInt16? = nil,
         warmupDurationMinutes: Int? = nil,
-        wearDurationMinutes: Int? = nil
+        wearDurationMinutes: Int? = nil,
+        securityVersion: UInt16? = nil,
+        region: UInt8? = nil
     ) throws {
         guard blePIN.count == 4 else {
             throw Libre3SensorStateError.wrongBlePINSize(blePIN.count)
@@ -34,6 +39,8 @@ public struct Libre3SensorState: Equatable, Sendable {
         self.lastGlucoseMgDL = lastGlucoseMgDL
         self.warmupDurationMinutes = warmupDurationMinutes.map { max(0, $0) }
         self.wearDurationMinutes = wearDurationMinutes.map { max(0, $0) }
+        self.securityVersion = securityVersion
+        self.region = region
     }
 
     public func updatingLastGlucose(lifeCount: UInt16, mgDL: UInt16?) throws -> Libre3SensorState {
@@ -46,13 +53,16 @@ public struct Libre3SensorState: Equatable, Sendable {
             lastGlucoseLifeCount: lifeCount,
             lastGlucoseMgDL: mgDL,
             warmupDurationMinutes: warmupDurationMinutes,
-            wearDurationMinutes: wearDurationMinutes
+            wearDurationMinutes: wearDurationMinutes,
+            securityVersion: securityVersion,
+            region: region
         )
     }
 
     /// Persist the sensor's warmup/wear cycle taken from the NFC patch info, so
     /// reconnects (which do not re-scan NFC) can build lifecycle from the
     /// sensor's reported durations rather than the assumed defaults.
+    /// Also retain the security version and region for pairing identity selection.
     public func applyingSensorCycle(from patchInfo: Libre3NFCPatchInfo) throws -> Libre3SensorState {
         try Libre3SensorState(
             serialNumber: serialNumber,
@@ -63,7 +73,9 @@ public struct Libre3SensorState: Equatable, Sendable {
             lastGlucoseLifeCount: lastGlucoseLifeCount,
             lastGlucoseMgDL: lastGlucoseMgDL,
             warmupDurationMinutes: Int(patchInfo.warmupMinutes),
-            wearDurationMinutes: Int(patchInfo.wearDurationMinutes)
+            wearDurationMinutes: Int(patchInfo.wearDurationMinutes),
+            securityVersion: patchInfo.securityVersion,
+            region: patchInfo.region
         )
     }
 
@@ -97,6 +109,8 @@ public enum Libre3SensorStateLoader {
         let lastGlucoseMgDL: UInt16?
         let warmupDurationMinutes: Int?
         let wearDurationMinutes: Int?
+        let securityVersion: UInt16?
+        let region: UInt8?
     }
 
     public static func load(fromJSON jsonData: Data) throws -> Libre3SensorState {
@@ -125,7 +139,9 @@ public enum Libre3SensorStateLoader {
             lastGlucoseLifeCount: decoded.lastGlucoseLifeCount,
             lastGlucoseMgDL: decoded.lastGlucoseMgDL,
             warmupDurationMinutes: decoded.warmupDurationMinutes,
-            wearDurationMinutes: decoded.wearDurationMinutes
+            wearDurationMinutes: decoded.wearDurationMinutes,
+            securityVersion: decoded.securityVersion,
+            region: decoded.region
         )
     }
 
@@ -139,7 +155,9 @@ public enum Libre3SensorStateLoader {
             lastGlucoseLifeCount: state.lastGlucoseLifeCount,
             lastGlucoseMgDL: state.lastGlucoseMgDL,
             warmupDurationMinutes: state.warmupDurationMinutes,
-            wearDurationMinutes: state.wearDurationMinutes
+            wearDurationMinutes: state.wearDurationMinutes,
+            securityVersion: state.securityVersion,
+            region: state.region
         )
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
