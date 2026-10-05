@@ -90,6 +90,16 @@ public struct FirstPairDerivedHandshakeResult: Sendable {
     public let phase5Material: FirstPairPhase5KeyMaterial
 }
 
+/// Result of the experimental VM-free first pair (`PlainPhase5Key`).
+public struct PlainFirstPairHandshakeResult: Sendable {
+    public let handshake: FirstPairHandshakeResult
+    /// The standard AES-128 key used for Phase 5 and Phase 6.
+    public let phase5Key: Data
+    /// ECDH(phone_static, sensor_static).
+    public let staticSecret: Data
+    public let secretOrder: PlainPhase5SecretOrder
+}
+
 /// Pairing/handshake errors.
 ///
 /// **Classification note for clients:** living in the *pairing* enum does not
@@ -476,6 +486,30 @@ public actor PairingFlow {
         r2Provider: () throws -> Data = defaultPhase5R2,
         commandTimeout: TimeInterval = 2
     ) async throws -> CommandGatedAuthorizationHandshakeResult {
+        try await runCommandGatedAuthorizationHandshake(
+            tail4: tail4,
+            phase5BlockProvider: { preamble in
+                let phase5RawKey = try phase5RawKeyProvider(preamble)
+                log("derived Phase 5 raw key len=\(phase5RawKey.count) data=\(Self.hex(phase5RawKey))")
+                guard phase5RawKey.count == 16 else {
+                    throw ChallengeError.wrongKeySize(phase5RawKey.count)
+                }
+                return try LibAES.phase5BlockEncryptor(rawKey: phase5RawKey)
+            },
+            r2Provider: r2Provider,
+            commandTimeout: commandTimeout
+        )
+    }
+
+    /// Shared Phase 5/6 wire driver. The block provider is called after the
+    /// sensor's `R1 || nonce7` notify and returns the AES block cipher used for
+    /// both the Phase 5 CCM message and the Phase 6 decrypt.
+    private func runCommandGatedAuthorizationHandshake(
+        tail4: Data,
+        phase5BlockProvider: (CommandGatedAuthorizationPreambleResult) throws -> AESBlockEncrypt,
+        r2Provider: () throws -> Data,
+        commandTimeout: TimeInterval
+    ) async throws -> CommandGatedAuthorizationHandshakeResult {
         guard tail4.count == 4 else {
             throw PairingFlowError.tail4WrongSize(tail4.count)
         }
@@ -488,12 +522,7 @@ public actor PairingFlow {
             throw ChallengeError.wrongPlaintextSize(preamble.sensorR1.count + phase5R2.count + tail4.count)
         }
 
-        let phase5RawKey = try phase5RawKeyProvider(preamble)
-        log("derived Phase 5 raw key len=\(phase5RawKey.count) data=\(Self.hex(phase5RawKey))")
-        guard phase5RawKey.count == 16 else {
-            throw ChallengeError.wrongKeySize(phase5RawKey.count)
-        }
-        let phase5Block = try LibAES.phase5BlockEncryptor(rawKey: phase5RawKey)
+        let phase5Block = try phase5BlockProvider(preamble)
         let phase5Plaintext = preamble.sensorR1 + phase5R2 + tail4
         let phase5 = try Phase5Challenge.encrypt(
             plaintext: phase5Plaintext,
@@ -700,6 +729,67 @@ public actor PairingFlow {
             throw PairingFlowError.phase5MaterialUnavailable
         }
         return FirstPairDerivedHandshakeResult(handshake: handshake, phase5Material: material)
+    }
+
+    /// Experimental VM-free first pair: derive the Phase 5 key with CryptoKit
+    /// ECDH and the plain single-step KDF (see `PlainPhase5Key`), then run
+    /// Phase 5/6 over standard AES-CCM.
+    ///
+    /// The flow must have been created with the identity's certificate and a
+    /// plain ephemeral (`EphemeralKeyPair()`), not a native first-pair one.
+    public func runCommandGatedPlainFirstPairHandshake(
+        blePIN: Data,
+        identity: PlainPairingIdentity,
+        secretOrder: PlainPhase5SecretOrder,
+        r2Provider: () throws -> Data = defaultPhase5R2,
+        commandTimeout: TimeInterval = 2
+    ) async throws -> PlainFirstPairHandshakeResult {
+        guard blePIN.count == 4 else {
+            throw PairingFlowError.blePINWrongSize(blePIN.count)
+        }
+        guard let phoneCert else {
+            throw PairingFlowError.phoneCertRequired
+        }
+        guard phoneCert == identity.phoneCert else {
+            throw PlainPairingError.staticPrivateKeyDoesNotMatchCertificate
+        }
+        guard phoneEph.privateKey.publicKey.x963Representation == phoneEph.publicKey65 else {
+            throw PlainPairingError.phoneEphemeralIsNotPlain
+        }
+
+        log("plain first-pair handshake start blePIN=\(Self.hex(blePIN)) order=\(secretOrder.rawValue)")
+        var derived: (key: Data, staticSecret: Data)?
+        let handshake = try await runCommandGatedAuthorizationHandshake(
+            tail4: blePIN,
+            phase5BlockProvider: { preamble in
+                let sensorStaticPub = try EphemeralExchange.parsePeerPubkey(
+                    preamble.phaseHandshake.sensorCert.staticPub
+                )
+                let staticSecret = try EphemeralExchange.sharedSecret(
+                    privateKey: identity.staticPrivateKey,
+                    peer: sensorStaticPub
+                )
+                let key = try PlainPhase5Key.derive(
+                    ephemeralSecret: preamble.phaseHandshake.sharedEphEph,
+                    staticSecret: staticSecret,
+                    order: secretOrder
+                )
+                log("derived plain Phase 5 key order=\(secretOrder.rawValue) key=\(Self.hex(key))")
+                derived = (key, staticSecret)
+                return AESCCM.commonCryptoBlockEncrypt(key: key)
+            },
+            r2Provider: r2Provider,
+            commandTimeout: commandTimeout
+        )
+        guard let derived else {
+            throw PairingFlowError.phase5MaterialUnavailable
+        }
+        return PlainFirstPairHandshakeResult(
+            handshake: handshake,
+            phase5Key: derived.key,
+            staticSecret: derived.staticSecret,
+            secretOrder: secretOrder
+        )
     }
 
 }
