@@ -12,3 +12,6 @@ Libre3SensorState.json
 
 # Remote runtime-tables blob (Scripts/build_runtime_tables_blob.py); served to host apps, not committed.
 RemoteTables/
+
+# Pairing identities (phone certificates with their private keys); kept out of the repo for now.
+RWDKAppIdentities.json
