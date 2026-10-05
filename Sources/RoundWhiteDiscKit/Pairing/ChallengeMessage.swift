@@ -10,8 +10,8 @@ import Foundation
 // The CCM nonce is the 7-byte trailer from the sensor's 23B challenge notify:
 //   sensor_A = R1(16) || nonce7(7)
 //
-// The block primitive is `LibAES.phase5BlockEncrypt` (`lib+0x5defec`), supplied
-// by callers as an `AESBlockEncrypt` so tests can also use standard AES.
+// Standard AES-128 is supplied by callers as an `AESBlockEncrypt` under
+// the plain Phase 5 key.
 
 public struct Phase5Challenge: Equatable, Sendable {
     public static let plaintextSize: Int = 36
@@ -31,8 +31,7 @@ public struct Phase5Challenge: Equatable, Sendable {
     }
 
     /// Build by AES-CCM encrypting the 36B `R1 || R2 || tail4` plaintext under
-    /// a standard AES key. Most current callers should pass
-    /// `LibAES.phase5BlockEncryptor(rawKey:)` to the lower-level overload.
+    /// the standard Phase 5 AES key.
     public static func encrypt(
         plaintext: Data,
         sessionKey: Data,

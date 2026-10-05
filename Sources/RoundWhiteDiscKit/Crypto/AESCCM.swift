@@ -1,8 +1,7 @@
 import Foundation
 import CommonCrypto
 
-// AES-128 block-encrypt primitive supplied to CCM/CMAC/challenge as a closure
-// (relocated here when the dead white-box `CipherFn.aes_K` path was removed).
+// AES-128 block-encrypt primitive supplied to CCM/challenge as a closure.
 public typealias AESBlockEncrypt = (Data) throws -> Data
 
 @inline(__always) func xor(_ a: Data, _ b: Data) -> Data {
@@ -13,9 +12,8 @@ public typealias AESBlockEncrypt = (Data) throws -> Data
 }
 
 // AES-128-CCM (NIST SP 800-38C) with the AES block primitive supplied as
-// a closure. Two natural users:
-//
-// - Standard AES under a session key: pass `AESCCM.commonCryptoEncrypt(key:)`.
+// a closure. For standard AES under a session key, pass
+// `AESCCM.commonCryptoBlockEncrypt(key:)`.
 //
 // Tag length is configurable; current Libre 3 Phase 5/6 ground truth uses M=4.
 
@@ -181,7 +179,7 @@ public enum AESCCM {
     // MARK: - Convenience: AES_K via CommonCrypto
 
     /// Returns an `AESBlockEncrypt` closure backed by AES-128 ECB under `key`.
-    /// Use this for standard-AES paths (e.g. session keys derived from KBKDF).
+    /// Used by pairing and data-plane AES-CCM.
     public static func commonCryptoBlockEncrypt(key: Data) -> AESBlockEncrypt {
         precondition(key.count == 16, "AES-128 requires a 16-byte key")
         let keyBytes = [UInt8](key)

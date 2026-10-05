@@ -7,8 +7,7 @@ import Foundation
 //   [56..60)  CCM tag, M=4
 //   [60..67)  sensor nonce7
 //
-// The same `LibAES.phase5BlockEncrypt` (`lib+0x5defec`) block primitive and
-// child[23]/ptr05-derived raw key used for Phase 5 decrypt this response.
+// The same standard AES-128 key used for Phase 5 decrypts this response.
 
 public struct Phase6SessionMaterial: Equatable, Sendable {
     public let phoneR2: Data
@@ -76,11 +75,6 @@ public struct Phase6Response: Equatable, Sendable {
             kEnc: plaintext.subdata(in: 32..<48),
             ivEnc: plaintext.subdata(in: 48..<56)
         )
-    }
-
-    public func decrypt(rawKey: Data, aad: Data = Data()) throws -> Phase6SessionMaterial {
-        let aes = try LibAES.phase5BlockEncryptor(rawKey: rawKey)
-        return try decrypt(aes: aes, aad: aad)
     }
 }
 
