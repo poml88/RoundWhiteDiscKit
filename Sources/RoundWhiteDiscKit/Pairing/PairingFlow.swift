@@ -367,13 +367,13 @@ public actor PairingFlow {
 
     /// Attempt cached/direct reconnect using the plain Phase 5 AES key from
     /// the most recent successful full authorization. Its ephemeral ECDH input
-    /// makes this key new on every full authorization; if the sensor accepts
-    /// cached reconnect, only that latest key can be valid.
+    /// makes this key new on every full authorization, and only that latest
+    /// key is valid.
     /// Store `result.phase5Key` in the Keychain after every successful full
     /// authorization, not in JSON sensor state, replacing the previous key.
     /// Starts at `StartAuthorization` and skips certificate/ephemeral exchange.
-    /// Acceptance of the plain key on this shorter path still needs a live test;
-    /// if this attempt fails, fall back to the full authorization handshake.
+    /// If the sensor rejects the cached key, fall back to the full
+    /// authorization handshake.
     public func runCachedReconnectHandshake(
         tail4: Data,
         phase5Key: Data,

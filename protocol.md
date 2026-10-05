@@ -336,8 +336,7 @@ the most recent successful full authorization. Its ephemeral ECDH input makes
 the key new on each full authorization, so only the latest key can be valid
 for a cached attempt.
 
-Acceptance of the plain key on the cached path is not yet confirmed on a live
-sensor.
+A live sensor accepted the plain key on the cached path.
 
 ### Phase 5 Phone Challenge
 

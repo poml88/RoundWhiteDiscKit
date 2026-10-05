@@ -326,12 +326,12 @@ The package exposes two reconnect shapes:
 The Phase 5 key includes ephemeral ECDH, so it changes with each full
 authorization. After every successful full authorization, store
 `result.phase5Key` in the app's Keychain for that sensor, replacing the previous
-key. Do not put it in JSON sensor state. If the sensor accepts cached reconnect,
-only the key from the most recent full authorization can be valid.
+key. Do not put it in JSON sensor state. Only the key from the most recent full
+authorization is valid for cached reconnect.
 
-Acceptance of the plain key on the cached path is not yet confirmed on a live
-sensor. When a saved key is available, try the cached path; if it fails, fall
-back to full authorization. Without a saved key, use full authorization directly.
+A live sensor accepts the plain key on the cached path. When a saved key is
+available, try the cached path; if it fails, fall back to full authorization.
+Without a saved key, use full authorization directly.
 
 ## License
 
